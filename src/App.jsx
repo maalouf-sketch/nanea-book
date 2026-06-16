@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { loadState, saveState, subscribe } from "./store.js";
-
 // ============================================================
 // NANEA — THE BOOK  ·  Tournament edition (Stage 1: scoring engine)
 // 6-round net tournament for 8 players + Ryder Cup + Tournament Points.
@@ -506,27 +505,90 @@ function RoundDetail({ r, state, tp, ranked }) {
 // ============================================================
 // COMMISH
 // ============================================================
+// Commish-owned fields that Save commits. Player scores + bets are NOT here —
+// they stay live and are preserved on merge so a Save never wipes them.
+const COMMISH_FIELDS = ["tournamentName", "holes", "ryder", "r4", "r6", "manualTP", "markets"];
+
+// Merge a commish draft onto the freshest live state without clobbering live scores/bets.
+function mergeCommishDraft(latest, draft) {
+  const out = JSON.parse(JSON.stringify(latest));
+  COMMISH_FIELDS.forEach((f) => { if (draft[f] !== undefined) out[f] = draft[f]; });
+  out.players = latest.players.map((lp) => {
+    const dp = draft.players.find((p) => p.id === lp.id);
+    return dp ? { ...lp, name: dp.name, h: dp.h, scores: lp.scores } : lp;
+  });
+  out.bets = latest.bets; // bets are placed/settled live, never from a stale draft
+  return out;
+}
+
 function Commish({ state, save, flash, tp }) {
   const [section, setSection] = useState("setup");
-  const P = (id) => state.players.find((x) => x.id === id);
-  const ranked = [...state.players].map((p) => ({ id: p.id, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts).map((x) => x.id);
+  // Draft: a working copy commish edits freely. Starts as a clone of live state.
+  const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(state)));
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // If live state changes (someone else saved, or scores came in) and we have NO
+  // unsaved edits, refresh our draft so we're editing current data.
+  useEffect(() => {
+    if (!dirty) setDraft(JSON.parse(JSON.stringify(state)));
+  }, [state, dirty]);
+
+  // draftSave mimics the live save() signature but only updates the local draft.
+  const draftSave = useCallback(async (next) => {
+    setDraft(next);
+    setDirty(true);
+  }, []);
+
+  // Commit: pull freshest live data, merge commish fields, write once.
+  const commit = async () => {
+    setSaving(true);
+    try {
+      const latest = (await loadState()) || state;
+      const merged = migrate(mergeCommishDraft(migrate(latest), draft));
+      await save(merged);
+      setDirty(false);
+      setDraft(JSON.parse(JSON.stringify(merged)));
+      flash("Saved — live for everyone ✓");
+    } catch (e) {
+      console.error(e); flash("Save failed — try again.");
+    }
+    setSaving(false);
+  };
+
+  const discard = () => { setDraft(JSON.parse(JSON.stringify(state))); setDirty(false); flash("Changes discarded."); };
+
+  // Settlement pays real money, so it commits immediately (not a draft action).
+  const liveSettle = save;
+
+  const P = (id) => draft.players.find((x) => x.id === id);
+  const ranked = [...draft.players].map((p) => ({ id: p.id, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts).map((x) => x.id);
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div style={{ display: "grid", gap: 16, paddingBottom: dirty ? 72 : 0 }}>
       <div className="nz-glass" style={S.card}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {[["setup", "Setup"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["tp", "TP Override"]].map(([k, l]) => (
             <button key={k} onClick={() => setSection(k)} style={{ ...S.roundPill, ...(section === k ? S.roundPillOn : {}) }}>{l}</button>
           ))}
         </div>
+        <p style={S.hint}>Edits are held as a draft on your screen until you press <b>Save</b>. Player scores keep updating live the whole time and are never overwritten by your save.</p>
       </div>
 
-      {section === "setup" && <CommishSetup state={state} save={save} flash={flash} />}
-      {section === "ryder" && <CommishRyder state={state} save={save} flash={flash} />}
-      {section === "r4" && <CommishR4 state={state} save={save} flash={flash} ranked={ranked} />}
-      {section === "r6" && <CommishR6 state={state} save={save} flash={flash} ranked={ranked} />}
-      {section === "book" && <CommishBook state={state} save={save} flash={flash} tp={tp} />}
-      {section === "tp" && <CommishTP state={state} save={save} flash={flash} tp={tp} />}
+      {section === "setup" && <CommishSetup state={draft} save={draftSave} flash={flash} />}
+      {section === "ryder" && <CommishRyder state={draft} save={draftSave} flash={flash} />}
+      {section === "r4" && <CommishR4 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
+      {section === "r6" && <CommishR6 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
+      {section === "book" && <CommishBook state={draft} save={draftSave} liveSettle={liveSettle} flash={flash} tp={tp} />}
+      {section === "tp" && <CommishTP state={draft} save={draftSave} flash={flash} tp={tp} />}
+
+      {dirty && (
+        <div style={S.saveBar} className="nz-fade">
+          <div style={{ flex: 1, fontFamily: SANS, fontSize: 13, color: "#1a0f08" }}><b>Unsaved changes</b> — not live yet</div>
+          <button onClick={discard} style={S.discardBtn}>Discard</button>
+          <button onClick={commit} disabled={saving} style={S.saveBtn}>{saving ? "Saving…" : "Save & go live"}</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -877,7 +939,7 @@ function BookView({ state, tp, me, setName, save, flash }) {
 }
 
 // ---- Commissioner betting controls ----
-function CommishBook({ state, save, flash, tp }) {
+function CommishBook({ state, save, flash, tp, liveSettle }) {
   const P = (id) => state.players.find((x) => x.id === id);
   const [propTitle, setPropTitle] = useState("");
   const [propOpts, setPropOpts] = useState([{ label: "", odds: "" }, { label: "", odds: "" }]);
@@ -916,10 +978,13 @@ function CommishBook({ state, save, flash, tp }) {
     flash("Line back to auto.");
   };
   const settle = async (marketId, winningOptionId) => {
-    const markets = state.markets.map((m) => m.id === marketId ? { ...m, status: "settled", winnerId: winningOptionId } : m);
-    const bets = state.bets.map((b) => (b.marketId === marketId && b.status === "pending") ? { ...b, status: b.optionId === winningOptionId ? "won" : "lost" } : b);
-    await save({ ...state, markets, bets });
-    flash("Market settled — money board updated.");
+    // Settlement pays real money — commit immediately against the FRESHEST live data,
+    // not the draft (which may have stale bets). Pull fresh, settle, write live.
+    const latest = migrate((await loadState()) || state);
+    const markets = latest.markets.map((m) => m.id === marketId ? { ...m, status: "settled", winnerId: winningOptionId } : m);
+    const bets = latest.bets.map((b) => (b.marketId === marketId && b.status === "pending") ? { ...b, status: b.optionId === winningOptionId ? "won" : "lost" } : b);
+    await liveSettle({ ...latest, markets, bets });
+    flash("Market settled live — money board updated.");
   };
   const rmMarket = async (marketId) => save({ ...state, markets: state.markets.filter((m) => m.id !== marketId), bets: state.bets.filter((b) => b.marketId !== marketId) });
 
@@ -1072,6 +1137,9 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  saveBar: { position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 60, display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', maxWidth: 680, margin: '0 auto', background: 'linear-gradient(135deg, #F2C188, #C77F45)', borderTopLeftRadius: 16, borderTopRightRadius: 16, boxShadow: '0 -8px 30px rgba(0,0,0,0.4)' },
+  saveBtn: { background: '#1a0f08', color: '#F2C188', border: 'none', borderRadius: 10, padding: '11px 18px', fontWeight: 700, cursor: 'pointer', fontFamily: SANS, fontSize: 14 },
+  discardBtn: { background: 'rgba(0,0,0,0.15)', color: '#1a0f08', border: 'none', borderRadius: 10, padding: '11px 14px', fontWeight: 600, cursor: 'pointer', fontFamily: SANS, fontSize: 13 },
   oddsChip: { flex: "1 1 130px", display: "flex", flexDirection: "column", gap: 4, background: "rgba(255,255,255,0.05)", border: `1px solid ${C.glassBorder}`, borderRadius: 12, padding: "12px 14px", minWidth: 120, cursor: "pointer", color: C.cream, textAlign: "left", fontFamily: SERIF },
   oddsSelected: { borderColor: C.copperLt, background: "rgba(242,166,90,0.18)", boxShadow: `0 0 0 1px ${C.copperLt}, 0 8px 24px rgba(242,166,90,0.25)` },
   oddsLabel: { fontSize: 14 },
