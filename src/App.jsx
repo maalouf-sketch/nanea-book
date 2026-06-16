@@ -79,6 +79,8 @@ const DEFAULT_STATE = {
   r4: { matches: [] }, // {id, xs:[id,id], ys:[id,id]}
   r6: { champ: [], losers: [], champWinner: "", loserLast: "" },
   manualTP: {}, // commissioner overrides id->delta (rare)
+  markets: [], // betting markets: {id, title, kind, status:'open'|'settled', winnerId, options:[{id,label,odds,manual:bool}]}
+  bets: [], // {id, who, marketId, optionId, label, stake, oddsAtBet, status, payout, ts}
 };
 
 export default function App() {
@@ -142,7 +144,7 @@ export default function App() {
       )}
 
       <nav style={S.tabs} className="nz-tabs">
-        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["rounds", "Rounds"], ["commish", "Commish"]].map(([k, lbl]) => (
+        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["rounds", "Rounds"], ["bets", "The Book"], ["commish", "Commish"]].map(([k, lbl]) => (
           <button key={k} onClick={() => setTab(k)} className="nz-tab" style={{ ...S.tab, ...(tab === k ? S.tabActive : {}) }}>{lbl}</button>
         ))}
       </nav>
@@ -152,6 +154,7 @@ export default function App() {
           {tab === "standings" && <Standings state={state} tp={tp} />}
           {tab === "scoring" && <Scoring state={state} me={me} setName={setName} save={save} />}
           {tab === "rounds" && <RoundsView state={state} tp={tp} />}
+          {tab === "bets" && <BookView state={state} tp={tp} me={me} setName={setName} save={save} flash={flash} />}
           {tab === "commish" && (isCommish
             ? <Commish state={state} save={save} flash={flash} tp={tp} />
             : <PinGate pinEntry={pinEntry} setPinEntry={setPinEntry} onTry={() => { if (pinEntry === COMMISH_PIN) { setIsCommish(true); flash("Welcome, Commissioner."); } else flash("Wrong PIN."); }} />)}
@@ -171,6 +174,8 @@ function migrate(s) {
   merged.r4 = { ...base.r4, ...(s.r4 || {}) };
   merged.r6 = { ...base.r6, ...(s.r6 || {}) };
   merged.manualTP = s.manualTP || {};
+  merged.markets = s.markets || [];
+  merged.bets = s.bets || [];
   return merged;
 }
 
@@ -510,7 +515,7 @@ function Commish({ state, save, flash, tp }) {
     <div style={{ display: "grid", gap: 16 }}>
       <div className="nz-glass" style={S.card}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {[["setup", "Setup"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["tp", "TP Override"]].map(([k, l]) => (
+          {[["setup", "Setup"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["tp", "TP Override"]].map(([k, l]) => (
             <button key={k} onClick={() => setSection(k)} style={{ ...S.roundPill, ...(section === k ? S.roundPillOn : {}) }}>{l}</button>
           ))}
         </div>
@@ -520,6 +525,7 @@ function Commish({ state, save, flash, tp }) {
       {section === "ryder" && <CommishRyder state={state} save={save} flash={flash} />}
       {section === "r4" && <CommishR4 state={state} save={save} flash={flash} ranked={ranked} />}
       {section === "r6" && <CommishR6 state={state} save={save} flash={flash} ranked={ranked} />}
+      {section === "book" && <CommishBook state={state} save={save} flash={flash} tp={tp} />}
       {section === "tp" && <CommishTP state={state} save={save} flash={flash} tp={tp} />}
     </div>
   );
@@ -721,6 +727,261 @@ function CommishTP({ state, save, flash, tp }) {
   );
 }
 
+// ============================================================
+// BETTING — auto-odds from standings/scores, public open bets,
+// commissioner override + settlement.
+// ============================================================
+
+const americanToMult = (o) => (o > 0 ? 1 + o / 100 : 1 + 100 / Math.abs(o));
+const probToAmerican = (p) => { p = Math.max(0.04, Math.min(0.90, p)); return p >= 0.5 ? -Math.round((p / (1 - p)) * 100) : Math.round(((1 - p) / p) * 100); };
+const softmax = (s, t = 1) => { const m = Math.max(...s); const e = s.map((x) => Math.exp((x - m) / t)); const sum = e.reduce((a, b) => a + b, 0); return e.map((x) => x / sum); };
+const round5 = (n) => { const a = Math.abs(n); let r; if (a < 150) r = Math.round(a / 5) * 5; else if (a < 300) r = Math.round(a / 10) * 10; else r = Math.round(a / 25) * 25; return n < 0 ? -r : r; };
+const withVig = (am, vig = 0.05) => round5(am < 0 ? Math.round(am * (1 + vig)) : Math.round(am * (1 - vig)));
+
+// Build auto-odds for "outright tournament winner" and "win next round" from current TP.
+function autoOddsByTP(state, tp) {
+  const ps = state.players.map((p) => ({ id: p.id, name: p.name, tp: tp.tp[p.id] }));
+  const strengths = ps.map((p) => p.tp + 8);
+  const probs = softmax(strengths, 10);
+  return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i])) }));
+}
+
+// Regenerate odds for a market if it's auto (not manually pinned).
+function refreshedOptions(market, state, tp) {
+  if (market.kind === "outright" || market.kind === "next_round") {
+    const auto = autoOddsByTP(state, tp);
+    return market.options.map((o) => {
+      if (o.manual) return o; // commissioner pinned this line
+      const a = auto.find((x) => x.id === o.optionId);
+      return a ? { ...o, odds: a.odds } : o;
+    });
+  }
+  return market.options;
+}
+
+function BookView({ state, tp, me, setName, save, flash }) {
+  const [sel, setSel] = useState(null); // {marketId, optionId, label, odds, title}
+  const [stake, setStake] = useState("");
+  const P = (id) => state.players.find((x) => x.id === id);
+
+  const place = async () => {
+    if (!me) return flash("Check in with your name first.");
+    if (!sel) return flash("Tap a line to bet.");
+    const s = parseFloat(stake);
+    if (!s || s <= 0) return flash("Enter a stake.");
+    const bet = { id: uid(), who: me, marketId: sel.marketId, optionId: sel.optionId, label: `${sel.title} — ${sel.label}`,
+      stake: s, oddsAtBet: sel.odds, status: "pending", payout: +(s * americanToMult(sel.odds)).toFixed(2), ts: Date.now() };
+    await save({ ...state, bets: [...state.bets, bet] });
+    setSel(null); setStake("");
+    flash(`Locked: $${s} to win $${(bet.payout - s).toFixed(2)}`);
+  };
+
+  const openMarkets = state.markets.filter((m) => m.status !== "settled");
+
+  // ledger for the standings strip
+  const ledger = {}; state.players.forEach((p) => (ledger[p.name] = 0));
+  state.bets.forEach((b) => { if (!(b.who in ledger)) ledger[b.who] = 0; if (b.status === "won") ledger[b.who] += b.payout - b.stake; else if (b.status === "lost") ledger[b.who] -= b.stake; });
+  const ledgerRows = Object.entries(ledger).sort((a, b) => b[1] - a[1]);
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      {!me && <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Check in to bet</div>
+        <select className="nz-input" style={S.input} defaultValue="" onChange={(e) => e.target.value && setName(e.target.value)}>
+          <option value="" disabled>pick your name</option>
+          {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+        </select></div>}
+
+      {!openMarkets.length && <Empty msg="No betting lines open yet. The commissioner opens markets — odds move automatically as scores and points change." />}
+
+      {openMarkets.map((m) => {
+        const opts = refreshedOptions(m, state, tp);
+        const betsOnMarket = state.bets.filter((b) => b.marketId === m.id);
+        return (
+          <div key={m.id} className="nz-glass" style={S.card}>
+            <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "next_round" ? "NEXT ROUND" : "PROP"}</span>
+              {m.live && <span style={{ ...S.kindTag, color: C.birdie }}>● LIVE ODDS</span>}</div>
+            <div style={S.cardTitle}>{m.title}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              {opts.map((o) => {
+                const active = sel && sel.marketId === m.id && sel.optionId === o.optionId;
+                return (
+                  <button key={o.optionId} className="nz-oddsbtn" onClick={() => setSel({ marketId: m.id, optionId: o.optionId, label: o.label, odds: o.odds, title: m.title })}
+                    style={{ ...S.oddsChip, ...(active ? S.oddsSelected : {}) }}>
+                    <span style={S.oddsLabel}>{o.label}</span>
+                    <span style={S.oddsNum}>{o.odds > 0 ? `+${o.odds}` : o.odds}{o.manual ? " ✎" : ""}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {/* public open bets on this market */}
+            {betsOnMarket.length > 0 && (
+              <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+                <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>WHO'S IN</div>
+                {betsOnMarket.map((b) => {
+                  const opt = m.options.find((o) => o.optionId === b.optionId);
+                  return <div key={b.id} style={S.openBetRow}>
+                    <span style={{ flex: 1 }}><b>{b.who}</b> · {opt?.label}</span>
+                    <span style={{ fontFamily: SANS, color: C.copperLt }}>${b.stake} @ {b.oddsAtBet > 0 ? `+${b.oddsAtBet}` : b.oddsAtBet}</span>
+                  </div>;
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {sel && (
+        <div className="nz-glass" style={S.betSlip}>
+          <div style={S.slipKicker}>BET SLIP</div>
+          <div style={S.slipPick}>{sel.title}<br /><strong style={{ color: C.copperLt }}>{sel.label}</strong> @ {sel.odds > 0 ? `+${sel.odds}` : sel.odds}</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+            <span style={{ color: C.cream, opacity: 0.8 }}>$</span>
+            <input className="nz-input" style={S.input} type="number" placeholder="stake" value={stake} onChange={(e) => setStake(e.target.value)} />
+          </div>
+          {stake > 0 && <div style={S.payout}>To win <strong>${(stake * americanToMult(sel.odds) - stake).toFixed(2)}</strong> · returns ${(stake * americanToMult(sel.odds)).toFixed(2)}</div>}
+          <button className="nz-primary" style={S.primaryBtn} onClick={place}>Lock it in</button>
+          <button onClick={() => setSel(null)} style={{ ...S.clearBtn, display: "block", margin: "10px auto 0" }}>cancel</button>
+        </div>
+      )}
+
+      {/* money board */}
+      {ledgerRows.some(([, v]) => v !== 0) && (
+        <div className="nz-glass" style={S.card}>
+          <div style={S.cardTitle}>The Money</div>
+          <p style={S.hint}>Net position from settled bets. Square up at the clubhouse.</p>
+          <div style={{ display: "grid", gap: 1, marginTop: 8 }}>
+            {ledgerRows.map(([name, amt]) => (
+              <div key={name} style={S.lbRow}><span style={{ flex: 1 }}>{name}</span>
+                <span style={{ fontFamily: SANS, fontWeight: 700, color: amt > 0 ? C.birdie : amt < 0 ? C.bogeyBad : C.fescue }}>{amt > 0 ? "+" : ""}${amt.toFixed(2)}</span></div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* settled history */}
+      {state.bets.some((b) => b.status !== "pending") && (
+        <div className="nz-glass" style={S.card}>
+          <div style={S.cardTitle}>Settled Bets</div>
+          <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+            {[...state.bets].filter((b) => b.status !== "pending").reverse().map((b) => (
+              <div key={b.id} style={S.betRow}>
+                <div><div style={{ fontWeight: 600 }}>{b.who}</div><div style={{ fontSize: 13, color: C.fescue }}>{b.label}</div></div>
+                <div style={{ textAlign: "right", fontFamily: SANS }}><div>${b.stake}</div><div style={{ fontSize: 12, color: b.status === "won" ? C.birdie : C.bogeyBad }}>{b.status.toUpperCase()}</div></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Commissioner betting controls ----
+function CommishBook({ state, save, flash, tp }) {
+  const P = (id) => state.players.find((x) => x.id === id);
+  const [propTitle, setPropTitle] = useState("");
+  const [propOpts, setPropOpts] = useState([{ label: "", odds: "" }, { label: "", odds: "" }]);
+
+  const openOutright = async () => {
+    const auto = autoOddsByTP(state, tp);
+    const m = { id: uid(), title: "Tournament Winner", kind: "outright", live: true, status: "open",
+      options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
+    await save({ ...state, markets: [...state.markets, m] });
+    flash("Outright market opened — odds auto-update.");
+  };
+  const openNextRound = async () => {
+    const auto = autoOddsByTP(state, tp);
+    const m = { id: uid(), title: "Wins the Next Round", kind: "next_round", live: true, status: "open",
+      options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
+    await save({ ...state, markets: [...state.markets, m] });
+    flash("Next-round market opened.");
+  };
+  const addProp = async () => {
+    if (!propTitle.trim()) return flash("Title needed.");
+    const opts = propOpts.filter((o) => o.label.trim()).map((o) => ({ optionId: uid(), label: o.label.trim(), odds: parseInt(o.odds) || 100, manual: true }));
+    if (opts.length < 2) return flash("Need 2+ options.");
+    const m = { id: uid(), title: propTitle.trim(), kind: "prop", live: false, status: "open", options: opts };
+    await save({ ...state, markets: [...state.markets, m] });
+    setPropTitle(""); setPropOpts([{ label: "", odds: "" }, { label: "", odds: "" }]);
+    flash("Prop posted.");
+  };
+  const overrideOdds = async (marketId, optionId, odds) => {
+    const markets = state.markets.map((m) => m.id !== marketId ? m : { ...m, options: m.options.map((o) => o.optionId === optionId ? { ...o, odds: parseInt(odds) || o.odds, manual: true } : o) });
+    await save({ ...state, markets });
+    flash("Line pinned (won't auto-move).");
+  };
+  const unpin = async (marketId, optionId) => {
+    const markets = state.markets.map((m) => m.id !== marketId ? m : { ...m, options: m.options.map((o) => o.optionId === optionId ? { ...o, manual: false } : o) });
+    await save({ ...state, markets });
+    flash("Line back to auto.");
+  };
+  const settle = async (marketId, winningOptionId) => {
+    const markets = state.markets.map((m) => m.id === marketId ? { ...m, status: "settled", winnerId: winningOptionId } : m);
+    const bets = state.bets.map((b) => (b.marketId === marketId && b.status === "pending") ? { ...b, status: b.optionId === winningOptionId ? "won" : "lost" } : b);
+    await save({ ...state, markets, bets });
+    flash("Market settled — money board updated.");
+  };
+  const rmMarket = async (marketId) => save({ ...state, markets: state.markets.filter((m) => m.id !== marketId), bets: state.bets.filter((b) => b.marketId !== marketId) });
+
+  return (
+    <>
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Open a Market</div>
+        <p style={S.hint}>Auto markets price themselves off the live standings and re-quote as points change. You can pin any single line to a fixed number.</p>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button className="nz-small" style={S.smallBtn} onClick={openOutright}>+ Tournament Winner</button>
+          <button className="nz-small" style={S.smallBtn} onClick={openNextRound}>+ Wins Next Round</button>
+        </div>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Custom Prop</div>
+        <input className="nz-input" style={S.input} placeholder='e.g. "Longest drive on 17"' value={propTitle} onChange={(e) => setPropTitle(e.target.value)} />
+        <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
+          {propOpts.map((o, i) => (
+            <div key={i} style={{ display: "flex", gap: 8 }}>
+              <input className="nz-input" style={{ ...S.input, flex: 2 }} placeholder={`Option ${i + 1}`} value={o.label} onChange={(e) => setPropOpts(propOpts.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} />
+              <input className="nz-input" style={{ ...S.input, flex: 1 }} placeholder="odds ±" value={o.odds} onChange={(e) => setPropOpts(propOpts.map((x, j) => j === i ? { ...x, odds: e.target.value } : x))} />
+              {propOpts.length > 2 && <button style={S.xBtn} onClick={() => setPropOpts(propOpts.filter((_, j) => j !== i))}>✕</button>}
+            </div>
+          ))}
+          <button className="nz-small" style={S.smallBtn} onClick={() => setPropOpts([...propOpts, { label: "", odds: "" }])}>+ option</button>
+        </div>
+        <button className="nz-primary" style={S.primaryBtn} onClick={addProp}>Post prop</button>
+      </div>
+
+      {state.markets.map((m) => {
+        const opts = refreshedOptions(m, state, tp);
+        return (
+          <div key={m.id} className="nz-glass" style={S.card}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={S.cardTitle}>{m.title}</div>
+              <button style={S.xBtn} onClick={() => rmMarket(m.id)}>✕</button>
+            </div>
+            <div style={S.kindTag}>{m.status === "settled" ? "SETTLED" : m.kind.toUpperCase()}</div>
+            <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+              {opts.map((o) => (
+                <div key={o.optionId} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <span style={{ flex: 1, fontSize: 14 }}>{o.label} <span style={{ color: C.copperLt, fontFamily: SANS }}>{o.odds > 0 ? `+${o.odds}` : o.odds}</span>{o.manual ? <span style={{ color: C.fescue, fontSize: 11 }}> pinned</span> : ""}</span>
+                  {m.status !== "settled" && <>
+                    <input className="nz-input" style={{ ...S.input, width: 70, padding: "6px 8px" }} placeholder="set" onKeyDown={(e) => { if (e.key === "Enter") overrideOdds(m.id, o.optionId, e.target.value); }} />
+                    {o.manual && <button style={S.miniGhost} onClick={() => unpin(m.id, o.optionId)}>auto</button>}
+                    <button style={S.miniGhost} onClick={() => settle(m.id, o.optionId)}>won</button>
+                  </>}
+                </div>
+              ))}
+            </div>
+            {m.status !== "settled" && <p style={S.hint}>Type a number + Enter to pin a line. "won" settles the market and pays out.</p>}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+
+const Empty = ({ msg }) => <div className="nz-glass" style={{ ...S.card, textAlign: "center", color: C.fescue, padding: 36, fontFamily: SANS }}>{msg}</div>;
+
 // ---- pin gate ----
 function PinGate({ pinEntry, setPinEntry, onTry }) {
   return (
@@ -811,6 +1072,18 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  oddsChip: { flex: "1 1 130px", display: "flex", flexDirection: "column", gap: 4, background: "rgba(255,255,255,0.05)", border: `1px solid ${C.glassBorder}`, borderRadius: 12, padding: "12px 14px", minWidth: 120, cursor: "pointer", color: C.cream, textAlign: "left", fontFamily: SERIF },
+  oddsSelected: { borderColor: C.copperLt, background: "rgba(242,166,90,0.18)", boxShadow: `0 0 0 1px ${C.copperLt}, 0 8px 24px rgba(242,166,90,0.25)` },
+  oddsLabel: { fontSize: 14 },
+  oddsNum: { fontSize: 22, fontWeight: 700, color: C.copperLt, fontFamily: SANS },
+  cardTop: { display: "flex", justifyContent: "space-between", marginBottom: 4 },
+  betSlip: { background: "linear-gradient(160deg, rgba(242,166,90,0.18), rgba(199,127,69,0.08))", border: `1px solid ${C.copperLt}`, borderRadius: 18, padding: 18, position: "sticky", bottom: 12, boxShadow: "0 12px 40px rgba(199,127,69,0.3)" },
+  slipKicker: { fontSize: 10, letterSpacing: 3, color: C.copperLt, fontFamily: SANS },
+  slipPick: { marginTop: 6, lineHeight: 1.5 },
+  payout: { marginTop: 8, color: C.birdie, fontSize: 14, fontFamily: SANS },
+  betRow: { display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: `1px solid ${C.line}` },
+  openBetRow: { display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13.5, color: C.cream },
+  miniGhost: { background: "rgba(255,255,255,0.06)", color: C.fescue, border: `1px solid ${C.glassBorder}`, borderRadius: 7, padding: "6px 9px", cursor: "pointer", fontFamily: SANS, fontSize: 12 },
   shell: { minHeight: "100%", background: `radial-gradient(circle at 50% -10%, ${C.ink2} 0%, ${C.ink} 55%)`, color: C.cream, fontFamily: SERIF, padding: "0 0 40px", position: "relative" },
   hero: { position: "relative", height: 200, overflow: "hidden", borderBottomLeftRadius: 26, borderBottomRightRadius: 26 },
   heroSvg: { position: "absolute", inset: 0, width: "100%", height: "100%" },
