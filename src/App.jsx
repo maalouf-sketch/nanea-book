@@ -9,6 +9,8 @@ import { loadState, saveState, subscribe, uploadAvatar } from "./store.js";
 // ============================================================
 
 const COMMISH_PIN = "1918"; // <-- CHANGE THIS before sharing
+// Only these players (by their real login name) can see the Commish tab.
+const COMMISH_NAMES = ["Cameron Maalouf", "Jack Clarey"];
 
 // ---- default course (par 73). Stroke index editable in Commish. ----
 const DEFAULT_HOLES = [
@@ -201,7 +203,7 @@ export default function App() {
       {profileFor && <ProfileModal state={state} tp={tp} playerId={profileFor} isMe={state.players.find((p) => p.id === profileFor)?.name === me} isCommish={isCommish} onClose={() => setProfileFor(null)} save={save} flash={flash} setName={setName} />}
 
       <nav style={S.tabs} className="nz-tabs">
-        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["ryder", "Ryder Cup"], ["rounds", "Rounds"], ["bets", "The Book"], ["commish", "Commish"]].map(([k, lbl]) => (
+        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["ryder", "Ryder Cup"], ["rounds", "Rounds"], ["bets", "The Book"], ...(COMMISH_NAMES.includes(me) ? [["commish", "Commish"]] : [])].map(([k, lbl]) => (
           <button key={k} onClick={() => setTab(k)} className="nz-tab" style={{ ...S.tab, ...(tab === k ? S.tabActive : {}) }}>{lbl}</button>
         ))}
       </nav>
@@ -213,9 +215,11 @@ export default function App() {
           {tab === "ryder" && <RyderView state={state} tp={tp} />}
           {tab === "rounds" && <RoundsView state={state} tp={tp} />}
           {tab === "bets" && <BookView state={state} tp={tp} me={me} setName={setName} save={save} flash={flash} />}
-          {tab === "commish" && (isCommish
-            ? <Commish state={state} save={save} flash={flash} tp={tp} />
-            : <PinGate pinEntry={pinEntry} setPinEntry={setPinEntry} onTry={() => { if (pinEntry === COMMISH_PIN) { setIsCommish(true); flash("Welcome, Commissioner."); } else flash("Wrong PIN."); }} />)}
+          {tab === "commish" && (COMMISH_NAMES.includes(me)
+            ? (isCommish
+                ? <Commish state={state} save={save} flash={flash} tp={tp} />
+                : <PinGate pinEntry={pinEntry} setPinEntry={setPinEntry} onTry={() => { if (pinEntry === COMMISH_PIN) { setIsCommish(true); flash("Welcome, Commissioner."); } else flash("Wrong PIN."); }} />)
+            : <Empty msg="The commissioner area is restricted." />)}
         </div>
       </main>
       <footer style={S.footer}>One shared book — everyone with the link sees the same scores and standings. Net scoring throughout · betting coming online soon.</footer>
@@ -948,9 +952,23 @@ function RoundDetail({ r, state, tp, ranked }) {
   }
   if (r.key === "r4") {
     if (!state.r4.matches.length) return <p style={S.hint}>Pairings set after R3 standings — 1st+8th vs 4th+5th, 2nd+7th vs 3rd+6th.</p>;
-    return <div style={{ marginTop: 8 }}>{state.r4.matches.map((m) => { const res = bestBallResult(state.holes, m, state);
-      return <div key={m.id} style={S.matchRow}><span style={{ flex: 1 }}>{m.xs.map((id) => dispName(P(id))).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => dispName(P(id))).join(" & ")}</span>
-        <span style={{ fontFamily: SANS, color: C.copperLt }}>{res.complete ? (res.up > 0 ? `${res.up}↑ X` : res.up < 0 ? `${-res.up}↑ Y` : "AS") : (res.up === 0 ? "—" : `${res.up > 0 ? "+" : ""}${res.up}`)}</span></div>; })}</div>;
+    return <div style={{ marginTop: 8 }}>{state.r4.matches.map((m) => {
+      const res = bestBallResult(state.holes, m, state);
+      const xN = m.xs.map((id) => dispName(P(id))).join(" & ");
+      const yN = m.ys.map((id) => dispName(P(id))).join(" & ");
+      const up = res.up;
+      let status, color = C.copperLt;
+      if (up === 0) { status = res.complete ? "Halved" : "All square"; color = C.fescue; }
+      else { const lead = Math.abs(up); const winner = up > 0 ? xN : yN; color = up > 0 ? C.birdie : C.ocean;
+        status = res.complete ? `${winner} win ${lead} up` : `${winner} ${lead} up`; }
+      return <div key={m.id} style={{ ...S.matchRow, alignItems: "flex-start" }}>
+        <span style={{ flex: 1 }}>
+          <span style={{ color: up > 0 ? C.birdie : C.cream }}>{xN}</span>
+          <span style={{ color: C.fescue }}> vs </span>
+          <span style={{ color: up < 0 ? C.ocean : C.cream }}>{yN}</span>
+        </span>
+        <span style={{ fontFamily: SANS, color, fontSize: 13, fontWeight: 700, textAlign: "right", minWidth: 110 }}>{status}{res.complete ? " · FINAL" : ""}</span>
+      </div>; })}</div>;
   }
   if (r.key === "r6") {
     if (!state.r6.champ.length) return <p style={S.hint}>Final groups set after R5 — top 4 in the Championship group, bottom 4 in the Losers group.</p>;
@@ -963,12 +981,32 @@ function RoundDetail({ r, state, tp, ranked }) {
   }
   // stableford / stroke ranking preview
   const isStbl = r.kind === "stableford";
-  const vals = state.players.map((p) => { const v = isStbl ? playerStbl(state.holes, p.scores[r.key], p.h) : playerNetTotal(state.holes, p.scores[r.key], p.h);
-    return { id: p.id, val: isStbl ? v.pts : v.net, thru: v.thru }; });
+  const parThru = (rs) => state.holes.reduce((s, H) => s + (rs[H.hole] != null ? H.par : 0), 0);
+  const vals = state.players.map((p) => {
+    const rs = p.scores[r.key] || {};
+    const t = playerNetTotal(state.holes, rs, p.h);
+    const stbl = isStbl ? playerStbl(state.holes, rs, p.h) : null;
+    return { id: p.id, sortVal: isStbl ? stbl.pts : t.net, thru: t.thru, gross: t.gross, net: t.net, toPar: t.thru ? t.net - parThru(rs) : null, pts: stbl ? stbl.pts : null };
+  });
   const any = vals.some((v) => v.thru > 0);
   if (!any) return <p style={S.hint}>{isStbl ? "Net Stableford — best points total earns 7 TP down to 0 for last." : "Net stroke play — lowest net earns 7 TP down to 0 for last."}</p>;
-  const sorted = [...vals].sort((a, b) => isStbl ? b.val - a.val : a.val - b.val);
-  return <div style={{ marginTop: 8 }}>{sorted.map((v, i) => <div key={v.id} style={S.matchRow}><span style={{ flex: 1 }}>{i + 1}. {dispName(P(v.id))}</span><span style={{ fontFamily: SANS, color: C.copperLt }}>{v.thru ? (isStbl ? v.val + " pts" : v.val + " net") : "—"}</span></div>)}</div>;
+  const sorted = [...vals].sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return isStbl ? b.sortVal - a.sortVal : a.sortVal - b.sortVal; });
+  return <div style={{ marginTop: 8 }}>
+    <div style={{ ...S.lbRow, ...S.lbHead }}>
+      <span style={{ flex: 1 }}>Player</span>
+      {isStbl && <span style={{ width: 44, textAlign: "right" }}>Pts</span>}
+      <span style={{ width: 52, textAlign: "right" }}>Gross</span>
+      <span style={{ width: 52, textAlign: "right" }}>Net</span>
+    </div>
+    {sorted.map((v, i) => (
+      <div key={v.id} style={S.matchRow}>
+        <span style={{ flex: 1 }}>{v.thru ? i + 1 : "–"}. {dispName(P(v.id))}</span>
+        {isStbl && <span style={{ width: 44, textAlign: "right", fontFamily: SANS, fontWeight: 700, color: C.cream }}>{v.thru ? v.pts : "—"}</span>}
+        <span style={{ width: 52, textAlign: "right", fontFamily: SANS, color: C.cream }}>{v.thru ? v.gross : "—"}</span>
+        <span style={{ width: 52, textAlign: "right", fontFamily: SANS, fontWeight: 800, color: v.toPar == null ? C.fescue : v.toPar < 0 ? C.birdie : v.toPar > 0 ? C.copperLt : C.cream }}>{v.thru ? relToPar(v.toPar) : "—"}</span>
+      </div>
+    ))}
+  </div>;
 }
 
 // ============================================================
@@ -1776,7 +1814,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
         <div style={S.cardTitle}>Pause the Book</div>
         <p style={S.hint}>{state.bookPaused ? "The book is PAUSED — players can't place new bets and see a closed message. Existing bets stand." : "Temporarily close betting. Players will see a 'temporarily closed' message; existing bets stay put."}</p>
         <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10, ...(state.bookPaused ? { background: "linear-gradient(135deg,#9AD17A,#6FA04E)" } : { background: "linear-gradient(135deg,#E07555,#C04A2A)", color: "#fff" }) }}
-          onClick={() => save({ ...state, bookPaused: !state.bookPaused })}>
+          onClick={async () => { const latest = migrate((await loadState()) || state); const now = !latest.bookPaused; await liveSettle({ ...latest, bookPaused: now }); flash(now ? "Book paused." : "Book reopened."); }}>
           {state.bookPaused ? "▶ Reopen the Book" : "⏸ Pause the Book"}
         </button>
       </div>
@@ -1881,16 +1919,36 @@ function CommishClear({ state, liveSave, flash }) {
     if (!window.confirm("Are you absolutely sure? This erases the entire tournament's scores.")) return;
     const latest = migrate((await loadState()) || state);
     const players = latest.players.map((p) => ({ ...p, scores: {}, submitted: {} }));
-    // also clear scramble team scores stored on R1 matches
     const r1 = (latest.ryder.r1 || []).map((m) => ({ ...m, xScores: {}, yScores: {}, submitted: {} }));
     await liveSave({ ...latest, players, ryder: { ...latest.ryder, r1 } });
     flash("All scores wiped. Every round reopened.");
   };
+  const gameDayReset = async () => {
+    if (!window.confirm("RESET FOR GAME DAY?\n\nThis wipes everything from testing:\n• all scores + scramble cards\n• all bets, settled history, the money board\n• all betting markets / wager lines\n• Ryder match pairings & results\n• nicknames and photos\n• unpauses the book\n\nKEEPS: player names, handicaps, login codes, scorecard, team names.\n\nCannot be undone.")) return;
+    if (!window.confirm("Final check — this clears all test data and returns to a fresh start. Proceed?")) return;
+    const latest = migrate((await loadState()) || state);
+    const players = latest.players.map((p) => ({ ...p, scores: {}, submitted: {}, displayName: "", avatar: "" }));
+    await liveSave({
+      ...latest,
+      players,
+      bets: [],
+      markets: [],
+      bookPaused: false,
+      ryder: { ...latest.ryder, r1: [], r2: [], playoff: "" },
+      manualTP: {},
+    });
+    flash("Reset complete — fresh and ready for game day.");
+  };
   return (
     <>
+    <div className="nz-glass" style={{ ...S.card, border: "1px solid rgba(224,117,85,0.55)" }}>
+      <div style={S.cardTitle}>🏁 Reset for Game Day</div>
+      <p style={S.hint}>Clears everything from testing — all scores, bets, markets, Ryder matches, nicknames and photos — and returns to a clean slate. <b>Keeps</b> your setup: player names, handicaps, login codes, scorecard, and team names. Use this once, right before the real tournament starts. Double-confirmed.</p>
+      <button style={{ ...S.miniGhost, padding: "12px 18px", marginTop: 8, color: "#fff", background: "linear-gradient(135deg,#E07555,#C04A2A)", border: "none" }} onClick={gameDayReset}>Reset everything for game day</button>
+    </div>
     <div className="nz-glass" style={{ ...S.card, border: "1px solid rgba(224,117,85,0.4)" }}>
       <div style={S.cardTitle}>Wipe All Scores</div>
-      <p style={S.hint}>Resets the entire tournament — every player, every round, including scramble team cards. Standings go back to zero. Use this to start fresh (e.g. after testing). Double-confirmed.</p>
+      <p style={S.hint}>Just the scores — every player, every round, including scramble team cards. Leaves bets, markets, names, nicknames intact. Double-confirmed.</p>
       <button style={{ ...S.miniGhost, padding: "11px 16px", marginTop: 8, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }} onClick={wipeAll}>Wipe ALL scores</button>
     </div>
     <div className="nz-glass" style={S.card}>
@@ -2034,22 +2092,47 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
         </div>
 
         <div style={{ marginTop: 12, maxHeight: 320, overflowY: "auto" }}>
-          {tab === "scores" && ROUNDS.map((r) => {
-            const rs = player.scores[r.key] || {};
-            const thru = state.holes.filter((H) => rs[H.hole] != null).length;
-            let detail = "—";
-            if (thru) {
-              if (r.kind === "stableford") detail = `${playerStbl(state.holes, rs, player.h).pts} pts`;
-              else { const t = playerNetTotal(state.holes, rs, player.h); detail = `${t.gross} gross · ${t.net} net`; }
-            }
-            const earned = r.key === "r3" ? tp.detail.r3?.[player.id] : r.key === "r5" ? tp.detail.r5?.[player.id] : null;
-            return (
-              <div key={r.key} style={S.lbRow}>
-                <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}<span style={{ color: C.fescue, fontSize: 12 }}>  {thru ? `${thru}/18` : "not started"}</span></span>
-                <span style={{ fontFamily: SANS, color: C.cream, fontSize: 13 }}>{detail}{earned != null ? ` · ${fmtTP(earned)} TP` : ""}</span>
+          {tab === "scores" && (
+            <>
+              <div style={{ ...S.lbRow, ...S.lbHead }}>
+                <span style={{ flex: 1 }}>Round</span>
+                <span style={{ width: 56, textAlign: "right" }}>Gross</span>
+                <span style={{ width: 56, textAlign: "right" }}>Net</span>
+                <span style={{ width: 44, textAlign: "right" }}>TP</span>
               </div>
-            );
-          })}
+              {ROUNDS.map((r) => {
+                const rs = player.scores[r.key] || {};
+                const thru = state.holes.filter((H) => rs[H.hole] != null).length;
+                let gross = "—", net = "—";
+                if (r.kind.includes("ryder")) {
+                  // Ryder rounds: per-player gross/net only meaningful for singles (r2); scramble is a team card
+                  if (r.key === "r2" && thru) { const t = playerNetTotal(state.holes, rs, player.h); gross = t.gross; net = t.net; }
+                  else { gross = "—"; net = "team"; }
+                } else if (thru) {
+                  const t = playerNetTotal(state.holes, rs, player.h);
+                  gross = t.gross; net = t.net;
+                }
+                // TP earned this round
+                let earned = null;
+                if (r.key === "r3") earned = tp.detail.r3?.[player.id];
+                else if (r.key === "r5") earned = tp.detail.r5?.[player.id];
+                else if (r.key === "r4") { const m = (tp.detail.r4 || []).find((x) => x.winner && x.winner.includes(player.id)); earned = m ? 4 : ((tp.detail.r4 || []).some((x) => (x.xs?.includes(player.id) || x.ys?.includes(player.id)) && x.complete) ? 0 : null); }
+                else if (r.key === "r1" || r.key === "r2") { const d = tp.detail.ryder; if (d && d.winners) earned = d.winners.includes(player.id) ? 2 : 0; }
+                return (
+                  <div key={r.key} style={S.lbRow}>
+                    <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}<span style={{ display: "block", color: C.fescue, fontSize: 11 }}>{thru ? `thru ${thru}` : "not started"}{r.kind === "stableford" && thru ? ` · ${playerStbl(state.holes, rs, player.h).pts} pts` : ""}</span></span>
+                    <span style={{ width: 56, textAlign: "right", fontFamily: SANS, color: C.cream, fontSize: 13 }}>{gross}</span>
+                    <span style={{ width: 56, textAlign: "right", fontFamily: SANS, color: C.cream, fontSize: 13 }}>{net}</span>
+                    <span style={{ width: 44, textAlign: "right", fontFamily: SANS, fontWeight: 700, color: earned ? C.copperLt : C.fescue, fontSize: 13 }}>{earned != null ? fmtTP(earned) : "—"}</span>
+                  </div>
+                );
+              })}
+              <div style={{ ...S.lbRow, borderTop: `1px solid ${C.line}`, marginTop: 4, paddingTop: 8 }}>
+                <span style={{ flex: 1, fontFamily: SANS, fontWeight: 700 }}>Total Tournament Points</span>
+                <span style={{ fontFamily: SANS, fontWeight: 800, color: C.copperLt, fontSize: 16 }}>{fmtTP(tp.tp[player.id] || 0)}</span>
+              </div>
+            </>
+          )}
 
           {tab === "bets" && (openBets.length ? openBets.map((b) => (
             <div key={b.id} style={S.openBetRow}><span style={{ flex: 1 }}>{b.label}</span>
