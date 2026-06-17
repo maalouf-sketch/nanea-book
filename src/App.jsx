@@ -329,6 +329,69 @@ function ryderMatchResult(holes, m, state, roundKey) {
   return { id: m.id, ...st, xs: m.xs, ys: m.ys, roundKey };
 }
 
+// Compact live match board for one Ryder round, shown under Live Scoring for R1/R2.
+function RyderRoundBoard({ state, roundKey }) {
+  const P = (id) => state.players.find((x) => x.id === id);
+  const ry = state.ryder;
+  const nameA = ry.teamAName || "Team A";
+  const nameB = ry.teamBName || "Team B";
+  const [openId, setOpenId] = useState(null);
+  const ms = roundKey === "r1" ? (ry.r1 || []) : (ry.r2 || []);
+  const roundNum = roundKey === "r1" ? 1 : 2;
+  const roundName = roundKey === "r1" ? "Scramble" : "Singles";
+
+  if (!ry.teamA.length || !ry.teamB.length) {
+    return <Empty msg="Teams aren't set yet. The commissioner assigns them in Commish → Ryder R1–2." />;
+  }
+  if (!ms.length) {
+    return <Empty msg={`No ${roundName.toLowerCase()} matches set yet. Commissioner builds them in Commish → Ryder R1–2.`} />;
+  }
+
+  return (
+    <div className="nz-glass" style={S.card}>
+      <div style={S.cardTitle}>Round {roundNum} · {roundName} — Live Matches</div>
+      <p style={S.hint}>Auto-scored from the entered scores. Tap a match to see the full card.</p>
+      {ms.map((m) => {
+        const res = ryderMatchResult(state.holes, m, state, roundKey);
+        const xNames = m.xs.map((id) => P(id)?.name).filter(Boolean);
+        const yNames = m.ys.map((id) => P(id)?.name).filter(Boolean);
+        const xUp = res.up > 0, yUp = res.up < 0;
+        return (
+          <div key={m.id} style={S.matchCard}>
+            <div className="nz-lbrow" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", borderRadius: 8 }} onClick={() => setOpenId(openId === m.id ? null : m.id)}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, color: xUp ? C.birdie : C.cream }}>{xNames.join(" & ") || "—"}</div>
+                <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>{nameA.toUpperCase()}</div>
+              </div>
+              <div style={{ textAlign: "center", minWidth: 84 }}>
+                <div style={{ fontFamily: SANS, fontWeight: 800, fontSize: 15, color: res.final ? (res.result === "H" ? C.fescue : C.copperLt) : C.copperLt }}>
+                  {res.up === 0 && !res.final ? "AS" : (res.final ? res.status : `${Math.abs(res.up)} UP`)}
+                </div>
+                <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS }}>{res.final ? "FINAL" : res.thru ? `thru ${res.thru}` : "tap to view"}</div>
+              </div>
+              <div style={{ flex: 1, textAlign: "right" }}>
+                <div style={{ fontWeight: 700, color: yUp ? C.ocean : C.cream }}>{yNames.join(" & ") || "—"}</div>
+                <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>{nameB.toUpperCase()}</div>
+              </div>
+            </div>
+            <div style={S.mpTrack}>
+              <div style={S.mpCenter} />
+              <div style={{ ...S.mpFill, ...(res.up > 0 ? { right: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.birdie } : res.up < 0 ? { left: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.ocean } : { left: "50%", width: 0 }) }} />
+            </div>
+            {roundKey === "r1" && m.xs.length === 2 && m.ys.length === 2 && (
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: SANS, fontSize: 11, color: C.fescue }}>
+                <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h)}</span>
+                <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h)}</span>
+              </div>
+            )}
+            {openId === m.id && <div className="nz-expand"><RyderMatchScorecard state={state} m={m} roundKey={roundKey} nameA={nameA} nameB={nameB} /></div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // Hole-by-hole scorecard for one Ryder match (scramble team scores or singles nets).
 function RyderMatchScorecard({ state, m, roundKey, nameA, nameB }) {
   const P = (id) => state.players.find((x) => x.id === id);
@@ -495,24 +558,26 @@ function RyderBanner({ state, tp }) {
   const d = tp.detail.ryder;
   if (!d) return null;
   const P = (id) => state.players.find((x) => x.id === id);
+  const nameA = state.ryder.teamAName || "Team A";
+  const nameB = state.ryder.teamBName || "Team B";
   return (
     <div className="nz-glass" style={S.card}>
       <div style={S.cardTitle}>Ryder Cup</div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", marginTop: 10 }}>
         <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>TEAM A</div>
+          <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>{nameA.toUpperCase()}</div>
           <div style={{ fontSize: 40, fontWeight: 800, fontFamily: SANS, color: d.aPts >= d.bPts ? C.copperLt : C.cream }}>{fmtTP(d.aPts)}</div>
         </div>
         <div style={{ color: C.fescue, fontFamily: SANS }}>vs</div>
         <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>TEAM B</div>
+          <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>{nameB.toUpperCase()}</div>
           <div style={{ fontSize: 40, fontWeight: 800, fontFamily: SANS, color: d.bPts >= d.aPts ? C.copperLt : C.cream }}>{fmtTP(d.bPts)}</div>
         </div>
       </div>
       {d.winners
-        ? <div style={{ textAlign: "center", color: C.birdie, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>Team {d.winners === state.ryder.teamA ? "A" : "B"} wins the Cup — each player on the team gets +2 TP</div>
+        ? <div style={{ textAlign: "center", color: C.birdie, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>{d.winners === state.ryder.teamA ? nameA : nameB} wins the Cup — each player on the team gets +2 TP</div>
         : <div style={{ textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>{d.aPts === d.bPts && (d.aPts + d.bPts) > 0 ? "All square — captain playoff needed" : "In progress"}</div>}
-      <p style={{ ...S.hint, textAlign: "center" }}>6 points are up for grabs across the 2 scramble + 4 singles matches combined. Win the majority and every player on the winning team earns 2 Tournament Points — it's one team prize for the combined result, not 2 points per match.</p>
+      <p style={{ ...S.hint, textAlign: "center" }}>6 points across the 2 scramble + 4 singles matches combined. Win the majority and every player on the winning team earns 2 Tournament Points — one team prize for the combined result, not 2 per match.</p>
     </div>
   );
 }
@@ -618,6 +683,9 @@ function Scoring({ state, me, setName, save, isCommish }) {
       )}
       {myPlayer && roundKey !== "r1" && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} />}
 
+      {round.kind.includes("ryder") ? (
+        <RyderRoundBoard state={state} roundKey={roundKey} />
+      ) : (
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Round {round.n} — {round.name}</div>
         <div style={{ display: "grid", gap: 1, marginTop: 10 }}>
@@ -656,6 +724,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
         </div>
         <p style={S.hint}>Tap a player to see their full scorecard. Net scoring applied automatically.{isCommish ? " As commissioner you can reopen or clear a submitted round here." : ""}</p>
       </div>
+      )}
     </div>
   );
 }
