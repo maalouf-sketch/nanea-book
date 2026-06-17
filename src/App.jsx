@@ -297,21 +297,22 @@ function bestBallResult(holes, m, state) {
   return { id: m.id, up: x, winner, complete, xs: m.xs, ys: m.ys };
 }
 
-// Per-hole NET for one Ryder side. roundKey 'r1' = scramble (best gross of pair + team
-// handicap blend), 'r2' = singles (each player's own net; pairs use best net of the side).
-function ryderSideNet(holes, ids, state, roundKey) {
+// Per-hole NET for one Ryder side.
+// roundKey 'r1' = scramble: the PAIR enters one team gross per hole (stored on the match
+//   as teamScores), then we apply the blended team handicap.
+// roundKey 'r2' = singles: each player's own net.
+function ryderSideNet(holes, ids, state, roundKey, teamScores) {
   const P = (id) => state.players.find((x) => x.id === id);
-  const sc = (id) => (P(id)?.scores?.[roundKey]) || {};
   const out = {};
   if (roundKey === "r1") {
-    // scramble: one ball = best gross of the pair on each hole, then apply team handicap
-    const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : P(ids[0]).h;
+    const ts = teamScores || {};
+    const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 0);
     holes.forEach((H) => {
-      const grosses = ids.map((id) => sc(id)[H.hole]).filter((v) => v != null);
-      out[H.hole] = grosses.length ? netHole(Math.min(...grosses), H.si, teamH) : null;
+      const g = ts[H.hole];
+      out[H.hole] = g != null ? netHole(g, H.si, teamH) : null;
     });
   } else {
-    // singles / per-player net; if a side somehow has 2, take their best net
+    const sc = (id) => (P(id)?.scores?.[roundKey]) || {};
     holes.forEach((H) => {
       const nets = ids.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, P(id).h) : null; }).filter((v) => v != null);
       out[H.hole] = nets.length ? Math.min(...nets) : null;
@@ -322,8 +323,8 @@ function ryderSideNet(holes, ids, state, roundKey) {
 
 // Full auto-calculated result for a Ryder match (scramble or singles).
 function ryderMatchResult(holes, m, state, roundKey) {
-  const xNet = ryderSideNet(holes, m.xs, state, roundKey);
-  const yNet = ryderSideNet(holes, m.ys, state, roundKey);
+  const xNet = ryderSideNet(holes, m.xs, state, roundKey, m.xScores);
+  const yNet = ryderSideNet(holes, m.ys, state, roundKey, m.yScores);
   const st = matchStatus(holes, xNet, yNet);
   return { id: m.id, ...st, xs: m.xs, ys: m.ys, roundKey };
 }
@@ -371,6 +372,12 @@ function RyderView({ state, tp }) {
           <div style={S.mpCenter} />
           <div style={{ ...S.mpFill, ...(res.up >= 0 ? { left: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.birdie } : { right: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.ocean }) }} />
         </div>
+        {roundKey === "r1" && m.xs.length === 2 && m.ys.length === 2 && (
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: SANS, fontSize: 11, color: C.fescue }}>
+            <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h)}</span>
+            <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h)}</span>
+          </div>
+        )}
       </div>
     );
   };
@@ -507,6 +514,20 @@ function Scoring({ state, me, setName, save, isCommish }) {
   };
   const isSubmitted = (p) => !!(p.submitted && p.submitted[roundKey]);
 
+  // ---- R1 scramble team entry: find the match this player is in, and which side ----
+  const myMatch = (state.ryder.r1 || []).find((m) => m.xs.includes(myPlayer?.id) || m.ys.includes(myPlayer?.id));
+  const mySide = myMatch ? (myMatch.xs.includes(myPlayer?.id) ? "x" : "y") : null;
+  const setTeamScore = async (matchId, side, hole, gross) => {
+    const r1 = state.ryder.r1.map((m) => {
+      if (m.id !== matchId) return m;
+      const key = side === "x" ? "xScores" : "yScores";
+      const cur = { ...(m[key] || {}) };
+      if (gross == null) delete cur[hole]; else cur[hole] = gross;
+      return { ...m, [key]: cur };
+    });
+    await save({ ...state, ryder: { ...state.ryder, r1 } });
+  };
+
   // par played so far (for net-to-par display)
   const parThru = (rs) => holes.reduce((s, H) => s + (rs[H.hole] != null ? H.par : 0), 0);
 
@@ -540,7 +561,12 @@ function Scoring({ state, me, setName, save, isCommish }) {
           {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
         </select></div>}
 
-      {myPlayer && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} />}
+      {myPlayer && roundKey === "r1" && (
+        myMatch
+          ? <ScrambleTeamCard state={state} holes={holes} match={myMatch} side={mySide} setTeamScore={setTeamScore} />
+          : <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Scramble — Round 1</div><p style={S.hint}>You're not in a scramble match yet. The commissioner sets the R1 pairings in Commish → Ryder R1–2.</p></div>
+      )}
+      {myPlayer && roundKey !== "r1" && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} />}
 
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Round {round.n} — {round.name}</div>
@@ -580,6 +606,62 @@ function Scoring({ state, me, setName, save, isCommish }) {
         </div>
         <p style={S.hint}>Tap a player to see their full scorecard. Net scoring applied automatically.{isCommish ? " As commissioner you can reopen or clear a submitted round here." : ""}</p>
       </div>
+    </div>
+  );
+}
+
+function ScrambleTeamCard({ state, holes, match, side, setTeamScore }) {
+  const P = (id) => state.players.find((x) => x.id === id);
+  const ids = side === "x" ? match.xs : match.ys;
+  const oppIds = side === "x" ? match.ys : match.xs;
+  const scores = (side === "x" ? match.xScores : match.yScores) || {};
+  const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 0);
+  const teamNames = ids.map((id) => P(id)?.name).filter(Boolean).join(" & ");
+  const oppNames = oppIds.map((id) => P(id)?.name).filter(Boolean).join(" & ");
+
+  const thru = holes.filter((H) => scores[H.hole] != null).length;
+  const nextHole = thru >= 18 ? 18 : (() => { const miss = holes.find((H) => scores[H.hole] == null); return miss ? miss.hole : 18; })();
+  const [h, setH] = useState(nextHole);
+  const H = holes.find((x) => x.hole === h);
+  const cur = scores[h];
+  const teamStrokes = strokesOnHole(H.si, teamH);
+  const res = ryderMatchResult(holes, match, state, "r1");
+  const myUp = side === "x" ? res.up : -res.up;
+
+  return (
+    <div className="nz-mycard" style={S.myCard}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div style={S.kicker}>Scramble Card · {teamNames}</div>
+        <div style={{ fontFamily: SANS, fontSize: 13, color: C.cream, opacity: 0.85 }}>{thru === 0 ? "Not started" : res.final ? res.status : (myUp === 0 ? `AS thru ${thru}` : `${myUp > 0 ? myUp + " UP" : Math.abs(myUp) + " DN"} thru ${thru}`)}</div>
+      </div>
+
+      {/* scramble handicap explainer */}
+      <div style={S.scrambleHcpBox}>
+        <div style={{ fontFamily: SANS, fontSize: 13, color: C.cream }}>Team scramble handicap: <strong style={{ color: C.copperLt }}>{teamH}</strong></div>
+        <div style={{ fontFamily: SANS, fontSize: 11, color: C.fescue, marginTop: 2 }}>
+          {ids.length === 2 ? `35% of ${Math.min(P(ids[0]).h, P(ids[1]).h)} + 15% of ${Math.max(P(ids[0]).h, P(ids[1]).h)} = ${teamH} · vs ${oppNames}` : `vs ${oppNames}`}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
+        <button className="nz-holenav" style={S.holeNav} disabled={h <= 1} onClick={() => setH(Math.max(1, h - 1))}>‹</button>
+        <div style={{ textAlign: "center", flex: 1 }}>
+          <div style={{ fontSize: 12, color: C.copperLt, fontFamily: SANS, letterSpacing: 2 }}>HOLE</div>
+          <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1, fontFamily: SANS }}>{h}</div>
+          <div style={{ fontSize: 13, color: C.cream, opacity: 0.8, fontFamily: SANS }}>Par {H.par} · SI {H.si}{teamStrokes > 0 ? ` · team gets ${teamStrokes} stroke${teamStrokes > 1 ? "s" : ""}` : ""}</div>
+        </div>
+        <button className="nz-holenav" style={S.holeNav} disabled={h >= 18} onClick={() => setH(Math.min(18, h + 1))}>›</button>
+      </div>
+      <div style={{ textAlign: "center", fontSize: 12, color: C.fescue, fontFamily: SANS, marginTop: 6 }}>Enter your team's one scramble score</div>
+      <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 12, flexWrap: "wrap" }}>
+        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
+          const diff = n - H.par; const active = cur === n;
+          return <button key={n} className="nz-score" onClick={() => { setTeamScore(match.id, side, h, n); if (h < 18) setTimeout(() => setH(h + 1), 200); }} style={{ ...S.scoreBtn, ...(active ? scoreColor(diff) : {}) }}>{n}</button>;
+        })}
+      </div>
+      {cur != null && <div style={{ textAlign: "center", marginTop: 12, fontFamily: SANS, fontSize: 13, color: C.cream, opacity: 0.9 }}>
+        Team gross {cur} · net {netHole(cur, H.si, teamH)} on {h}. <button style={S.clearBtn} onClick={() => setTeamScore(match.id, side, h, null)}>clear</button></div>}
+      <p style={{ ...S.hint, textAlign: "center" }}>Either teammate can enter — you share one card. Both of you (and everyone) see it live.</p>
     </div>
   );
 }
@@ -1480,6 +1562,7 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  scrambleHcpBox: { marginTop: 12, padding: '10px 12px', background: 'rgba(199,127,69,0.12)', border: '1px solid rgba(242,193,136,0.3)', borderRadius: 10 },
   matchCard: { background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px', marginTop: 10 },
   mpTrack: { position: 'relative', height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, marginTop: 10, overflow: 'hidden' },
   mpCenter: { position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: 'rgba(255,255,255,0.25)' },
