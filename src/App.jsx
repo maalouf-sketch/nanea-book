@@ -68,6 +68,36 @@ function rankToTP(arr, higherBetter) {
   return out;
 }
 
+// ---- Ryder match-play engine ----
+// Standard 2-person scramble team handicap: 35% low + 15% high, rounded.
+const scrambleTeamHcp = (h1, h2) => { const lo = Math.min(h1, h2), hi = Math.max(h1, h2); return Math.round(0.35 * lo + 0.15 * hi); };
+
+// Compute live match-play status from two sides' per-hole NET scores.
+// xNet / yNet are objects keyed by hole number (or undefined if not entered).
+// Auto-closes ("3&2") the moment a side is more holes up than holes remain.
+function matchStatus(holes, xNet, yNet) {
+  let up = 0, thru = 0, decidedHole = null;
+  for (let i = 0; i < holes.length; i++) {
+    const h = holes[i].hole;
+    if (xNet[h] == null || yNet[h] == null) break;
+    thru++;
+    if (xNet[h] < yNet[h]) up++; else if (yNet[h] < xNet[h]) up--;
+    if (Math.abs(up) > holes.length - thru) { decidedHole = thru; break; }
+  }
+  const final = decidedHole != null || thru === holes.length;
+  let result = null, status;
+  if (decidedHole != null) {
+    result = up > 0 ? "X" : "Y";
+    status = `${Math.abs(up)}&${holes.length - decidedHole}`;
+  } else if (final) {
+    if (up === 0) { result = "H"; status = "Halved (AS)"; }
+    else { result = up > 0 ? "X" : "Y"; status = `${Math.abs(up)} UP`; }
+  } else {
+    status = up === 0 ? (thru ? `All square thru ${thru}` : "Not started") : `${Math.abs(up)} UP thru ${thru}`;
+  }
+  return { up, thru, final, result, status };
+}
+
 const DEFAULT_STATE = {
   tournamentName: "Nanea Invitational",
   holes: DEFAULT_HOLES,
@@ -194,20 +224,22 @@ function computeTP(state) {
   const holes = state.holes;
   const detail = { r1: null, r2: null, ryder: null, r3: {}, r4: [], r5: {}, r6: null };
 
-  // ---- Ryder Cup (R1 scramble + R2 singles) ----
+  // ---- Ryder Cup (R1 scramble + R2 singles) — auto-calculated from scores ----
   const ry = state.ryder;
   if (ry.teamA.length && ry.teamB.length) {
     let aPts = 0, bPts = 0;
-    const tallyMatch = (m) => {
-      // m.result: 'X' (xs win), 'Y' (ys win), 'H' halved, '' pending
-      // xs are on team A by construction in commish; but track by side flag
-      if (m.result === "X") return m.side === "A" ? [1, 0] : [0, 1];
-      if (m.result === "Y") return m.side === "A" ? [0, 1] : [1, 0];
-      if (m.result === "H") return [0.5, 0.5];
-      return [0, 0];
+    const matchResults = {};
+    const tallyMatch = (m, roundKey) => {
+      const res = ryderMatchResult(holes, m, state, roundKey);
+      matchResults[m.id] = res;
+      // xs are Team A, ys are Team B (built that way in commish).
+      if (res.result === "X") { aPts += 1; }
+      else if (res.result === "Y") { bPts += 1; }
+      else if (res.result === "H") { aPts += 0.5; bPts += 0.5; }
     };
-    [...(ry.r1 || []), ...(ry.r2 || [])].forEach((m) => { const [a, b] = tallyMatch(m); aPts += a; bPts += b; });
-    detail.ryder = { aPts, bPts };
+    (ry.r1 || []).forEach((m) => tallyMatch(m, "r1"));
+    (ry.r2 || []).forEach((m) => tallyMatch(m, "r2"));
+    detail.ryder = { aPts, bPts, matchResults };
     let winners = null;
     if (aPts > bPts) winners = ry.teamA;
     else if (bPts > aPts) winners = ry.teamB;
@@ -262,6 +294,37 @@ function bestBallResult(holes, m, state) {
   });
   const winner = x > 0 ? m.xs : x < 0 ? m.ys : null;
   return { id: m.id, up: x, winner, complete, xs: m.xs, ys: m.ys };
+}
+
+// Per-hole NET for one Ryder side. roundKey 'r1' = scramble (best gross of pair + team
+// handicap blend), 'r2' = singles (each player's own net; pairs use best net of the side).
+function ryderSideNet(holes, ids, state, roundKey) {
+  const P = (id) => state.players.find((x) => x.id === id);
+  const sc = (id) => (P(id)?.scores?.[roundKey]) || {};
+  const out = {};
+  if (roundKey === "r1") {
+    // scramble: one ball = best gross of the pair on each hole, then apply team handicap
+    const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : P(ids[0]).h;
+    holes.forEach((H) => {
+      const grosses = ids.map((id) => sc(id)[H.hole]).filter((v) => v != null);
+      out[H.hole] = grosses.length ? netHole(Math.min(...grosses), H.si, teamH) : null;
+    });
+  } else {
+    // singles / per-player net; if a side somehow has 2, take their best net
+    holes.forEach((H) => {
+      const nets = ids.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, P(id).h) : null; }).filter((v) => v != null);
+      out[H.hole] = nets.length ? Math.min(...nets) : null;
+    });
+  }
+  return out;
+}
+
+// Full auto-calculated result for a Ryder match (scramble or singles).
+function ryderMatchResult(holes, m, state, roundKey) {
+  const xNet = ryderSideNet(holes, m.xs, state, roundKey);
+  const yNet = ryderSideNet(holes, m.ys, state, roundKey);
+  const st = matchStatus(holes, xNet, yNet);
+  return { id: m.id, ...st, xs: m.xs, ys: m.ys, roundKey };
 }
 
 // ============================================================
@@ -542,12 +605,25 @@ function RoundDetail({ r, state, tp, ranked }) {
     const ms = r.key === "r1" ? state.ryder.r1 : state.ryder.r2;
     if (!state.ryder.teamA.length) return <p style={S.hint}>Teams not set yet — commissioner assigns Team A / Team B.</p>;
     return <div style={{ marginTop: 8 }}>
-      <p style={S.hint}>Counts toward the combined Ryder Cup (6 points total across both rounds). The team that wins the majority takes the Cup, and each player on that team gets 2 TP — not per match.</p>
-      {(ms || []).map((m) => (
-      <div key={m.id} style={S.matchRow}>
-        <span style={{ flex: 1 }}>{m.xs.map((id) => P(id)?.name).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => P(id)?.name).join(" & ")}</span>
-        <span style={{ fontFamily: SANS, color: m.result ? C.copperLt : C.fescue }}>{m.result === "X" ? "◀" : m.result === "Y" ? "▶" : m.result === "H" ? "AS" : "—"}</span>
-      </div>))}</div>;
+      <p style={S.hint}>Auto-scored from each player's hole scores. Counts toward the combined Ryder Cup (6 points across both rounds). Win the majority and each player on the winning team gets 2 TP.</p>
+      {(ms || []).map((m) => {
+        const res = ryderMatchResult(state.holes, m, state, r.key);
+        const color = res.result === "X" ? C.birdie : res.result === "Y" ? C.ocean : res.result === "H" ? C.fescue : C.copperLt;
+        return (
+          <div key={m.id} style={{ ...S.matchRow, alignItems: "flex-start" }}>
+            <span style={{ flex: 1 }}>
+              <span style={{ color: res.result === "X" ? C.birdie : C.cream }}>{m.xs.map((id) => P(id)?.name).join(" & ")}</span>
+              <span style={{ color: C.fescue }}> vs </span>
+              <span style={{ color: res.result === "Y" ? C.ocean : C.cream }}>{m.ys.map((id) => P(id)?.name).join(" & ")}</span>
+            </span>
+            <span style={{ fontFamily: SANS, color, fontSize: 13, fontWeight: 700, textAlign: "right", minWidth: 90 }}>
+              {res.final
+                ? (res.result === "H" ? "Halved" : `${res.result === "X" ? m.xs.map((id) => P(id)?.name.split(" ")[0]).join("/") : m.ys.map((id) => P(id)?.name.split(" ")[0]).join("/")} win ${res.status}`)
+                : res.status}
+            </span>
+          </div>
+        );
+      })}</div>;
   }
   if (r.key === "r4") {
     if (!state.r4.matches.length) return <p style={S.hint}>Pairings set after R3 standings — 1st+8th vs 4th+5th, 2nd+7th vs 3rd+6th.</p>;
@@ -730,7 +806,10 @@ function CommishRyder({ state, save, flash }) {
     </select>
   );
 
-  const MatchEditor = ({ key2, m, partners }) => (
+  const MatchEditor = ({ key2, m, partners }) => {
+    const res = ryderMatchResult(state.holes, m, state, key2);
+    const color = res.result === "X" ? C.birdie : res.result === "Y" ? C.ocean : res.result === "H" ? C.fescue : C.copperLt;
+    return (
     <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 10, marginTop: 10 }}>
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, width: 50 }}>Team A</span>
@@ -743,13 +822,12 @@ function CommishRyder({ state, save, flash }) {
         <PlayerPicker value={m.ys[0]} pool={ry.teamB} onPick={(v) => updMatch(key2, m.id, { ys: partners ? [v, m.ys[1]] : [v] })} />
         {partners && <PlayerPicker value={m.ys[1]} pool={ry.teamB} onPick={(v) => updMatch(key2, m.id, { ys: [m.ys[0], v] })} />}
       </div>
-      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-        {[["X", "A wins"], ["Y", "B wins"], ["H", "Halved"], ["", "Pending"]].map(([v, l]) => (
-          <button key={v} onClick={() => updMatch(key2, m.id, { result: v, side: "A" })} style={{ ...S.resultBtn, ...(m.result === v ? S.resultOn : {}) }}>{l}</button>
-        ))}
+      <div style={{ marginTop: 8, padding: "7px 10px", background: "rgba(255,255,255,0.04)", borderRadius: 8, fontFamily: SANS, fontSize: 13, color }}>
+        Auto: {res.final ? (res.result === "H" ? "Halved — ½ pt each" : `Team ${res.result === "X" ? "A" : "B"} wins ${res.status}`) : res.status}
       </div>
     </div>
   );
+  };
 
   return (
     <>
