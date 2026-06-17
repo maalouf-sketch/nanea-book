@@ -50,6 +50,27 @@ const firstName = (p) => dispName(p).split(" ")[0];
 const strokesOnHole = (si, ph) => (ph >= si ? 1 : 0) + (ph >= si + 18 ? 1 : 0);
 const netHole = (g, si, ph) => g - strokesOnHole(si, ph);
 
+// ---- Course handicap (USGA): Index × (Slope/113) + (Rating − Par), rounded to whole.
+// When slope=113 and rating=par, this returns the index unchanged (no adjustment).
+const STANDARD_SLOPE = 113;
+const courseDefaults = (state) => ({
+  slope: state?.course?.slope || STANDARD_SLOPE,
+  rating: (state?.course?.rating != null ? state.course.rating : null),
+  enabled: !!(state?.course && state.course.enabled),
+});
+// par total from the scorecard
+const coursePar = (holes) => (holes || []).reduce((s, H) => s + (H.par || 0), 0);
+// Effective playing handicap for a player given the course settings.
+function courseHcp(index, state) {
+  const c = courseDefaults(state);
+  if (!c.enabled) return index; // course adjustment off → use the raw index everywhere
+  const par = coursePar(state.holes);
+  const ratingTerm = (c.rating != null && par) ? (c.rating - par) : 0;
+  return Math.round(index * (c.slope / STANDARD_SLOPE) + ratingTerm);
+}
+// Resolve a player's effective handicap (course-adjusted if enabled). Use this in scoring.
+const effH = (p, state) => courseHcp(p.h, state);
+
 // ---- editable scoring rules (commish-configurable, with safe defaults) ----
 const RULES_DEFAULTS = {
   finishTP: [7, 6, 5, 4, 3, 2, 1, 0],     // TP by finish position (1st..8th) for R3/R5/R6
@@ -289,6 +310,7 @@ function migrate(s) {
   merged.bookPaused = !!s.bookPaused;
   // Book display visibility (commish-controlled). Default ON so nothing disappears for existing setups.
   merged.show = { money: true, settled: true, ...(s.show || {}) };
+  merged.course = { enabled: false, slope: 113, rating: null, ...(s.course || {}) };
   return merged;
 }
 
@@ -327,7 +349,7 @@ function computeTP(state) {
   }
 
   // ---- R3 Stableford ----
-  const r3vals = state.players.map((p) => { const s = playerStbl(holes, p.scores.r3, p.h, R); return { id: p.id, val: s.pts, thru: s.thru }; });
+  const r3vals = state.players.map((p) => { const s = playerStbl(holes, p.scores.r3, effH(p, state), R); return { id: p.id, val: s.pts, thru: s.thru }; });
   if (r3vals.some((v) => v.thru > 0)) {
     const done = r3vals.filter((v) => v.thru === 18);
     if (done.length === state.players.length) {
@@ -345,7 +367,7 @@ function computeTP(state) {
   });
 
   // ---- R5 stroke ----
-  const r5vals = state.players.map((p) => { const t = playerNetTotal(holes, p.scores.r5, p.h); return { id: p.id, val: t.net, thru: t.thru }; });
+  const r5vals = state.players.map((p) => { const t = playerNetTotal(holes, p.scores.r5, effH(p, state)); return { id: p.id, val: t.net, thru: t.thru }; });
   if (r5vals.every((v) => v.thru === 18) && r5vals.length) {
     const map = rankToTP(r5vals.map((v) => ({ id: v.id, val: v.val })), false, R.finishTP);
     Object.entries(map).forEach(([id, v]) => (tp[id] += v));
@@ -363,8 +385,8 @@ function bestBallResult(holes, m, state) {
   const sc = (id) => (P(id)?.scores?.r4) || {};
   let x = 0, complete = true;
   holes.forEach((H) => {
-    const xs = m.xs.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, P(id).h) : null; }).filter((v) => v != null);
-    const ys = m.ys.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, P(id).h) : null; }).filter((v) => v != null);
+    const xs = m.xs.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, effH(P(id), state)) : null; }).filter((v) => v != null);
+    const ys = m.ys.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, effH(P(id), state)) : null; }).filter((v) => v != null);
     if (!xs.length || !ys.length) { complete = false; return; }
     const xn = Math.min(...xs), yn = Math.min(...ys);
     if (xn < yn) x++; else if (yn < xn) x--;
@@ -382,7 +404,7 @@ function ryderSideNet(holes, ids, state, roundKey, teamScores) {
   const out = {};
   if (roundKey === "r1") {
     const ts = teamScores || {};
-    const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? P(ids[0]).h : 0);
+    const teamH = ids.length === 2 ? scrambleTeamHcp(effH(P(ids[0]), state), effH(P(ids[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? effH(P(ids[0]), state) : 0);
     holes.forEach((H) => {
       const g = ts[H.hole];
       out[H.hole] = g != null ? netHole(g, H.si, teamH) : null;
@@ -390,7 +412,7 @@ function ryderSideNet(holes, ids, state, roundKey, teamScores) {
   } else {
     const sc = (id) => (P(id)?.scores?.[roundKey]) || {};
     holes.forEach((H) => {
-      const nets = ids.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, P(id).h) : null; }).filter((v) => v != null);
+      const nets = ids.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, effH(P(id), state)) : null; }).filter((v) => v != null);
       out[H.hole] = nets.length ? Math.min(...nets) : null;
     });
   }
@@ -456,8 +478,8 @@ function RyderRoundBoard({ state, roundKey }) {
             </div>
             {roundKey === "r1" && m.xs.length === 2 && m.ys.length === 2 && (
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: SANS, fontSize: 11, color: C.fescue }}>
-                <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
-                <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
+                <span>scr. hcp {scrambleTeamHcp(effH(P(m.xs[0]), state), effH(P(m.xs[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
+                <span>scr. hcp {scrambleTeamHcp(effH(P(m.ys[0]), state), effH(P(m.ys[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
               </div>
             )}
             {openId === m.id && <div className="nz-expand"><RyderMatchScorecard state={state} m={m} roundKey={roundKey} nameA={nameA} nameB={nameB} /></div>}
@@ -555,8 +577,8 @@ function RyderView({ state, tp }) {
         </div>
         {roundKey === "r1" && m.xs.length === 2 && m.ys.length === 2 && (
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: SANS, fontSize: 11, color: C.fescue }}>
-            <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
-            <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
+            <span>scr. hcp {scrambleTeamHcp(effH(P(m.xs[0]), state), effH(P(m.xs[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
+            <span>scr. hcp {scrambleTeamHcp(effH(P(m.ys[0]), state), effH(P(m.ys[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
           </div>
         )}
         {openId === m.id && <div className="nz-expand"><RyderMatchScorecard state={state} m={m} roundKey={roundKey} nameA={nameA} nameB={nameB} /></div>}
@@ -609,13 +631,13 @@ function Standings({ state, tp, onProfile }) {
   // R5 is "final" when every player has submitted R5 or holed out all 18.
   const r5Final = state.players.length > 0 && state.players.every((p) => {
     const submitted = !!(p.submitted && p.submitted.r5);
-    const holed = playerNetTotal(state.holes, p.scores.r5, p.h).thru === 18;
+    const holed = playerNetTotal(state.holes, p.scores.r5, effH(p, state)).thru === 18;
     return submitted || holed;
   });
   // Show the Championship/Losers leaderboards only once R5 is final AND the groups are built.
   // Until then, keep the TP standings with a projected cut line so everyone can see where they stand.
   const groupsSet = r5Final && state.r6.champ.length > 0 && state.r6.losers.length > 0;
-  const r6net = (id) => { const pl = P(id); const t = playerNetTotal(state.holes, pl?.scores.r6, pl?.h); return { ...t, id }; };
+  const r6net = (id) => { const pl = P(id); const t = playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)); return { ...t, id }; };
   const parThru6 = (id) => { const pl = P(id); return state.holes.reduce((s, H) => s + ((pl?.scores.r6 || {})[H.hole] != null ? H.par : 0), 0); };
 
   // ---- PHASE 1: groups not set yet → projected cut by TP ----
@@ -832,10 +854,10 @@ function Scoring({ state, me, setName, save, isCommish }) {
   // leaderboard for this round
   const rows = state.players.map((p) => {
     const rs = p.scores[roundKey] || {};
-    const t = playerNetTotal(holes, rs, p.h);
+    const t = playerNetTotal(holes, rs, effH(p, state));
     const toPar = t.thru ? t.net - parThru(rs) : null;
     if (round.kind === "stableford") {
-      const s = playerStbl(holes, rs, p.h, RZ(state));
+      const s = playerStbl(holes, rs, effH(p, state), RZ(state));
       return { p, sortVal: s.pts, thru: s.thru, gross: t.gross, net: t.net, toPar, stbl: s.pts, higher: true };
     }
     return { p, sortVal: t.net, thru: t.thru, gross: t.gross, net: t.net, toPar, stbl: null, higher: false };
@@ -853,6 +875,28 @@ function Scoring({ state, me, setName, save, isCommish }) {
         <div style={{ marginTop: 10, color: C.copperLt, fontFamily: SANS, fontSize: 13 }}>{round.fmt}</div>
       </div>
 
+      {state.course && state.course.enabled && (() => {
+        const anyAdj = state.players.some((p) => courseHcp(p.h, state) !== p.h);
+        if (!anyAdj) return null;
+        return (
+          <div className="nz-glass" style={{ ...S.card, border: "1px solid rgba(154,209,122,0.4)" }}>
+            <div style={S.cardTitle}>⛳ Course is playing tough</div>
+            <p style={{ ...S.hint, marginBottom: 6 }}>This course's slope ({state.course.slope}) is above average, so handicaps are adjusted USGA-style — higher handicaps get a few <b>extra</b> strokes. Your playing handicap for net scoring:</p>
+            <div style={{ display: "grid", gap: 1 }}>
+              {[...state.players].sort((a, b) => (courseHcp(b.h, state) - b.h) - (courseHcp(a.h, state) - a.h)).map((p) => {
+                const ch = courseHcp(p.h, state); const d = ch - p.h;
+                return (
+                  <div key={p.id} style={S.lbRow}>
+                    <span style={{ flex: 1, minWidth: 0 }}>{dispName(p)} <span style={{ color: C.fescue, fontSize: 12 }}>· index {p.h}</span></span>
+                    <span style={{ fontFamily: SANS, fontWeight: 700, color: C.cream, flexShrink: 0 }}>plays {ch} {d !== 0 && <span style={{ color: d > 0 ? C.birdie : C.bogeyBad, fontSize: 12 }}>({d > 0 ? "+" : ""}{d})</span>}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       {!me && <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Log in to score</div>
         <p style={S.hint}>Use the Check In box at the top to log in with your name and code, then you can enter your scores.</p></div>}
 
@@ -861,7 +905,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
           ? <ScrambleTeamCard state={state} holes={holes} match={myMatch} side={mySide} setTeamScore={setTeamScore} submitTeam={submitTeam} isSubmitted={teamSubmitted} />
           : <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Scramble — Round 1</div><p style={S.hint}>You're not in a scramble match yet. The commissioner sets the R1 pairings in Commish → Ryder R1–2.</p></div>
       )}
-      {myPlayer && roundKey !== "r1" && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} rules={RZ(state)} />}
+      {myPlayer && roundKey !== "r1" && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} rules={RZ(state)} eh={effH(myPlayer, state)} />}
 
       {round.kind.includes("ryder") ? (
         <RyderRoundBoard state={state} roundKey={roundKey} />
@@ -892,7 +936,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
                   <span style={{ width: 40, flexShrink: 0, textAlign: "right", fontWeight: 800, fontFamily: SANS, color: toPar == null ? C.fescue : toPar < 0 ? C.birdie : toPar > 0 ? C.copperLt : C.cream }}>{thru ? relToPar(toPar) : "—"}</span>
                 </div>
                 {open === p.id && <div className="nz-expand">
-                  <Scorecard player={p} holes={holes} roundKey={roundKey} />
+                  <Scorecard player={p} holes={holes} roundKey={roundKey} eh={effH(p, state)} />
                   {isCommish && (
                     <div style={{ display: "flex", gap: 6, padding: "4px 8px 10px" }}>
                       {isSubmitted(p)
@@ -943,7 +987,7 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore, submitTeam,
   const ids = side === "x" ? match.xs : match.ys;
   const oppIds = side === "x" ? match.ys : match.xs;
   const scores = (side === "x" ? match.xScores : match.yScores) || {};
-  const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? P(ids[0]).h : 0);
+  const teamH = ids.length === 2 ? scrambleTeamHcp(effH(P(ids[0]), state), effH(P(ids[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? effH(P(ids[0]), state) : 0);
   const teamNames = ids.map((id) => dispName(P(id))).filter(Boolean).join(" & ");
   const oppNames = oppIds.map((id) => dispName(P(id))).filter(Boolean).join(" & ");
 
@@ -1008,7 +1052,8 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore, submitTeam,
   );
 }
 
-function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmitted, rules = RULES_DEFAULTS }) {
+function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmitted, rules = RULES_DEFAULTS, eh }) {
+  const ph = (eh != null ? eh : player.h);
   const rs = player.scores[roundKey] || {};
   const thru = holes.filter((H) => rs[H.hole] != null).length;
   const nextHole = thru >= 18 ? 18 : (() => { const miss = holes.find((H) => rs[H.hole] == null); return miss ? miss.hole : 18; })();
@@ -1016,8 +1061,8 @@ function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmi
   useEffect(() => { setH(nextHole); /* eslint-disable-next-line */ }, [roundKey]);
   const H = holes.find((x) => x.hole === h);
   const cur = rs[h];
-  const strokes = strokesOnHole(H.si, player.h);
-  const t = round.kind === "stableford" ? playerStbl(holes, rs, player.h, rules).pts : playerNetTotal(holes, rs, player.h).net;
+  const strokes = strokesOnHole(H.si, ph);
+  const t = round.kind === "stableford" ? playerStbl(holes, rs, ph, rules).pts : playerNetTotal(holes, rs, ph).net;
 
   // Soft lock: when submitted, editing a hole asks for confirmation first.
   const guardedSetScore = (pid, hole, val) => {
@@ -1053,7 +1098,7 @@ function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmi
         })}
       </div>
       {cur != null && <div style={{ textAlign: "center", marginTop: 12, fontFamily: SANS, fontSize: 13, color: C.cream, opacity: 0.9 }}>
-        Gross {cur} · Net {netHole(cur, H.si, player.h)} on {h}. <button style={S.clearBtn} onClick={() => guardedSetScore(player.id, h, null)}>clear</button></div>}
+        Gross {cur} · Net {netHole(cur, H.si, ph)} on {h}. <button style={S.clearBtn} onClick={() => guardedSetScore(player.id, h, null)}>clear</button></div>}
       {!isSubmitted && (
         <button className="nz-primary" style={{ ...S.primaryBtn, opacity: thru === 18 ? 1 : 0.55 }}
           onClick={() => { if (thru < 18 && !window.confirm(`You've only entered ${thru} of 18 holes. Submit anyway?`)) return; submitRound(player.id, roundKey); }}>
@@ -1064,15 +1109,16 @@ function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmi
   );
 }
 
-function Scorecard({ player, holes, roundKey }) {
+function Scorecard({ player, holes, roundKey, eh }) {
+  const ph = (eh != null ? eh : player.h);
   const rs = player.scores[roundKey] || {};
   const front = holes.slice(0, 9), back = holes.slice(9);
-  const sumNet = (arr) => arr.reduce((s, H) => s + (rs[H.hole] != null ? netHole(rs[H.hole], H.si, player.h) : 0), 0);
+  const sumNet = (arr) => arr.reduce((s, H) => s + (rs[H.hole] != null ? netHole(rs[H.hole], H.si, ph) : 0), 0);
   const Nine = ({ hs, label }) => (
     <table style={{ ...S.scTable, ...S.scTableFit, marginBottom: 8 }}><tbody>
       <tr><td style={S.scLblFit}>Hole</td>{hs.map((H) => <td key={H.hole} style={S.scHFit}>{H.hole}</td>)}<td style={{ ...S.scHFit, color: C.cream, fontWeight: 700, borderLeft: `1px solid ${C.line}` }}>{label}</td></tr>
       <tr><td style={S.scLblFit}>Par</td>{hs.map((H) => <td key={H.hole} style={S.scParFit}>{H.par}</td>)}<td style={{ ...S.scParFit, borderLeft: `1px solid ${C.line}` }}>{hs.reduce((s, H) => s + H.par, 0)}</td></tr>
-      <tr><td style={S.scLblFit}>Net</td>{hs.map((H) => { const v = rs[H.hole]; const net = v != null ? netHole(v, H.si, player.h) : null; const diff = net != null ? net - H.par : null;
+      <tr><td style={S.scLblFit}>Net</td>{hs.map((H) => { const v = rs[H.hole]; const net = v != null ? netHole(v, H.si, ph) : null; const diff = net != null ? net - H.par : null;
         return <td key={H.hole} style={{ padding: "1px" }}><div style={{ ...S.scValFit, borderRadius: 4, ...(diff != null ? scoreColor(diff) : {}) }}>{net ?? "·"}</div></td>; })}
         <td style={{ ...S.scValFit, color: C.copperLt, borderLeft: `1px solid ${C.line}` }}>{sumNet(hs) || "·"}</td></tr>
     </tbody></table>
@@ -1229,7 +1275,7 @@ function RoundDetail({ r, state, tp, ranked }) {
     if (!state.r6.champ.length) return <p style={S.hint}>Final groups set after R5 — top 4 in the Championship group, bottom 4 in the Losers group.</p>;
     const parThru6 = (rs) => state.holes.reduce((s, H) => s + (rs[H.hole] != null ? H.par : 0), 0);
     const groupRows = (ids) => ids.map((id) => {
-      const pl = P(id); const rs = pl?.scores.r6 || {}; const t = playerNetTotal(state.holes, rs, pl?.h);
+      const pl = P(id); const rs = pl?.scores.r6 || {}; const t = playerNetTotal(state.holes, rs, effH(pl, state));
       return { id, name: dispName(pl), thru: t.thru, gross: t.gross, net: t.net, toPar: t.thru ? t.net - parThru6(rs) : null };
     }).sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return a.net - b.net; });
     const Head = () => <div style={{ ...S.lbRow, ...S.lbHead }}><span style={{ flex: 1 }}>Player</span><span style={{ width: 52, textAlign: "right" }}>Gross</span><span style={{ width: 52, textAlign: "right" }}>Net</span></div>;
@@ -1252,8 +1298,8 @@ function RoundDetail({ r, state, tp, ranked }) {
   const parThru = (rs) => state.holes.reduce((s, H) => s + (rs[H.hole] != null ? H.par : 0), 0);
   const vals = state.players.map((p) => {
     const rs = p.scores[r.key] || {};
-    const t = playerNetTotal(state.holes, rs, p.h);
-    const stbl = isStbl ? playerStbl(state.holes, rs, p.h, RZ(state)) : null;
+    const t = playerNetTotal(state.holes, rs, effH(p, state));
+    const stbl = isStbl ? playerStbl(state.holes, rs, effH(p, state), RZ(state)) : null;
     return { id: p.id, sortVal: isStbl ? stbl.pts : t.net, thru: t.thru, gross: t.gross, net: t.net, toPar: t.thru ? t.net - parThru(rs) : null, pts: stbl ? stbl.pts : null };
   });
   const any = vals.some((v) => v.thru > 0);
@@ -1282,7 +1328,7 @@ function RoundDetail({ r, state, tp, ranked }) {
 // ============================================================
 // Commish-owned fields that Save commits. Player scores + bets are NOT here —
 // they stay live and are preserved on merge so a Save never wipes them.
-const COMMISH_FIELDS = ["tournamentName", "holes", "ryder", "r4", "r6", "manualTP", "markets", "rules"];
+const COMMISH_FIELDS = ["tournamentName", "holes", "ryder", "r4", "r6", "manualTP", "markets", "rules", "course"];
 
 // Merge a commish draft onto the freshest live state without clobbering live scores/bets.
 function mergeCommishDraft(latest, draft) {
@@ -1340,11 +1386,11 @@ function Commish({ state, save, flash, tp }) {
   const ranked = [...draft.players].map((p) => ({ id: p.id, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts).map((x) => x.id);
 
   return (
-    <div style={{ display: "grid", gap: 16, paddingBottom: dirty ? 72 : 0 }}>
+    <div style={{ display: "grid", gap: 16, paddingBottom: dirty ? 72 : 0, width: "100%", maxWidth: "100%", minWidth: 0, overflowX: "hidden" }}>
       <div className="nz-glass" style={S.card}>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <div className="nz-xscroll" style={{ display: "flex", gap: 6, paddingBottom: 4 }}>
           {[["setup", "Setup"], ["rules", "Scoring Rules"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["display", "Book Display"], ["clear", "Clear Scores"], ["tp", "TP Override"]].map(([k, l]) => (
-            <button key={k} onClick={() => setSection(k)} style={{ ...S.roundPill, ...(section === k ? S.roundPillOn : {}) }}>{l}</button>
+            <button key={k} onClick={() => setSection(k)} style={{ ...S.roundPill, ...(section === k ? S.roundPillOn : {}), flexShrink: 0 }}>{l}</button>
           ))}
         </div>
         <p style={S.hint}>Edits are held as a draft on your screen until you press <b>Save</b>. Player scores keep updating live the whole time and are never overwritten by your save.</p>
@@ -1473,12 +1519,50 @@ function CommishSetup({ state, save, flash }) {
         <div style={{ display: "grid", gap: 1, marginTop: 8 }}>
           {state.players.map((p) => (
             <div key={p.id} style={S.lbRow}>
-              <span style={{ flex: 1 }}>{p.name} <span style={{ color: p.pin ? C.birdie : C.fescue, fontSize: 12, fontFamily: SANS }}>{p.pin ? "· code set" : "· not claimed"}</span></span>
-              <button style={S.miniGhost} disabled={!p.pin} onClick={() => resetPin(p.id, p.name)}>Reset code</button>
+              <span style={{ flex: 1, minWidth: 0 }}>{p.name} <span style={{ color: p.pin ? C.birdie : C.fescue, fontSize: 12, fontFamily: SANS }}>{p.pin ? "· code set" : "· not claimed"}</span></span>
+              <button style={{ ...S.miniGhost, flexShrink: 0 }} disabled={!p.pin} onClick={() => resetPin(p.id, p.name)}>Reset code</button>
             </div>
           ))}
         </div>
       </div>
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Course Difficulty (Slope & Rating)</div>
+        <p style={S.hint}>Enter the tees' Course Rating and Slope. When on, the app converts each player's handicap index into a course handicap — a harder course (higher slope) gives higher handicaps a few extra strokes, per USGA. Leave off to use handicaps as-is.</p>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+          <button onClick={() => save({ ...state, course: { ...(state.course || { slope: 113, rating: null }), enabled: !(state.course && state.course.enabled) } })}
+            style={{ ...S.smallBtn, flexShrink: 0, minWidth: 110, background: (state.course && state.course.enabled) ? "linear-gradient(135deg,#9AD17A,#6FA04E)" : "rgba(255,255,255,0.08)", color: (state.course && state.course.enabled) ? "#0b1a0b" : C.fescue, border: (state.course && state.course.enabled) ? "none" : `1px solid ${C.glassBorder}` }}>
+            {(state.course && state.course.enabled) ? "Adjustment ON" : "Adjustment OFF"}
+          </button>
+          <span style={{ fontFamily: SANS, fontSize: 12, color: C.fescue }}>Par {coursePar(state.holes)} (from scorecard)</span>
+        </div>
+        <div style={{ display: "flex", gap: 14, marginTop: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS, marginBottom: 3 }}>Course Rating</div>
+            <input className="nz-input" style={{ ...S.input, width: "100%" }} type="number" step="0.1" defaultValue={state.course?.rating ?? ""} placeholder="e.g. 73.4"
+              onBlur={(e) => save({ ...state, course: { ...(state.course || { slope: 113, enabled: false }), rating: e.target.value === "" ? null : parseFloat(e.target.value) } })} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS, marginBottom: 3 }}>Slope <span style={{ opacity: 0.6 }}>(113 = avg)</span></div>
+            <input className="nz-input" style={{ ...S.input, width: "100%" }} type="number" defaultValue={state.course?.slope ?? 113} placeholder="113"
+              onBlur={(e) => save({ ...state, course: { ...(state.course || { rating: null, enabled: false }), slope: parseInt(e.target.value) || 113 } })} />
+          </div>
+        </div>
+        {(state.course && state.course.enabled) && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.copperLt, fontFamily: SANS, marginBottom: 6 }}>COURSE HANDICAPS (after adjustment)</div>
+            {state.players.map((p) => {
+              const ch = courseHcp(p.h, state); const diff = ch - p.h;
+              return (
+                <div key={p.id} style={S.lbRow}>
+                  <span style={{ flex: 1, minWidth: 0 }}>{p.name} <span style={{ color: C.fescue, fontSize: 12 }}>· index {p.h}</span></span>
+                  <span style={{ fontFamily: SANS, fontWeight: 700, color: C.cream, flexShrink: 0 }}>{ch}{diff !== 0 && <span style={{ color: diff > 0 ? C.birdie : C.bogeyBad, fontSize: 12, marginLeft: 6 }}>{diff > 0 ? `+${diff}` : diff}</span>}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Handicaps</div>
         <div style={{ display: "grid", gap: 1, marginTop: 8 }}>
@@ -1717,7 +1801,7 @@ function playerLiveEdge(state, pid, roundKey) {
   const p = state.players.find((x) => x.id === pid); if (!p) return 0;
   const rs = p.scores[roundKey] || {};
   let net = 0, par = 0;
-  state.holes.forEach((H) => { if (rs[H.hole] != null) { net += netHole(rs[H.hole], H.si, p.h); par += H.par; } });
+  state.holes.forEach((H) => { if (rs[H.hole] != null) { net += netHole(rs[H.hole], H.si, effH(p, state)); par += H.par; } });
   return par ? par - net : 0; // positive = under par (playing well)
 }
 
@@ -1778,7 +1862,7 @@ function currentLiveRound(state) {
 // side pulls away (4-5 up). Money on a side shades the line toward it.
 function autoOddsForMatch(state, m, roundKey, marketId) {
   const P = (id) => state.players.find((x) => x.id === id);
-  const sideH = (ids) => ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? P(ids[0]).h : 18);
+  const sideH = (ids) => ids.length === 2 ? scrambleTeamHcp(effH(P(ids[0]), state), effH(P(ids[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? effH(P(ids[0]), state) : 18);
   const xs = roundKey === "r1" ? sideH(m.xs) : P(m.xs[0]).h;
   const ys = roundKey === "r1" ? sideH(m.ys) : P(m.ys[0]).h;
   // baseline handicap strength (small spread; temp 5 keeps it modest)
@@ -1863,14 +1947,14 @@ function marketOutcome(market, state, tp) {
 
   // ---- Tournament Winner (outright; one option per player) ----
   if (market.kind === "outright") {
-    const finished = state.players.filter((p) => playerNetTotal(state.holes, p.scores.r6, p.h).thru === 18).length;
-    const allDone = state.r6.champ.length > 0 && state.r6.champ.every((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, pl?.h).thru === 18; });
+    const finished = state.players.filter((p) => playerNetTotal(state.holes, p.scores.r6, effH(p, state)).thru === 18).length;
+    const allDone = state.r6.champ.length > 0 && state.r6.champ.every((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)).thru === 18; });
     // Decided: championship group all finished R6 → lowest net in champ group wins the tournament.
     if (allDone) {
       let best = null, bestNet = Infinity;
-      state.r6.champ.forEach((id) => { const pl = state.players.find((x) => x.id === id); const net = playerNetTotal(state.holes, pl?.scores.r6, pl?.h).net; if (net < bestNet) { bestNet = net; best = id; } });
+      state.r6.champ.forEach((id) => { const pl = state.players.find((x) => x.id === id); const net = playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)).net; if (net < bestNet) { bestNet = net; best = id; } });
       // tie at the top → not auto-decided (commish playoff)
-      const tied = state.r6.champ.filter((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, pl?.h).net === bestNet; });
+      const tied = state.r6.champ.filter((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)).net === bestNet; });
       if (best && tied.length === 1) return { decided: true, winningOptionId: best, lock: true, reason: "Tournament over — champion decided" };
       return { ...none, lock: true, reason: "Final group done — tie, awaiting playoff" };
     }
@@ -1878,7 +1962,7 @@ function marketOutcome(market, state, tp) {
     const ranked = [...state.players].map((p) => ({ id: p.id, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts);
     if (ranked.length >= 2 && state.r6.champ.length) {
       const lead = ranked[0].pts - ranked[1].pts;
-      const champThru = state.r6.champ.map((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, pl?.h).thru; });
+      const champThru = state.r6.champ.map((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)).thru; });
       const minThru = Math.min(...champThru);
       // R6 is the last points round; if leader is well clear and final group is deep into the round, lock.
       if (lead >= 7 && minThru >= 14) return { ...none, lock: true, reason: "Leader pulling away late" };
@@ -2613,7 +2697,7 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
           <div style={{ flex: 1 }}>
             <div style={{ fontFamily: SERIF, fontSize: 22, color: C.cream }}>{dispName(player)}</div>
             {hasNick(player) && <div style={{ fontFamily: SANS, fontSize: 12, color: C.fescue }}>{player.name}</div>}
-            <div style={{ fontFamily: SANS, fontSize: 13, color: C.copperLt }}>{fmtTP(tp.tp[player.id] || 0)} Tournament Points · hcp {player.h}</div>
+            <div style={{ fontFamily: SANS, fontSize: 13, color: C.copperLt }}>{fmtTP(tp.tp[player.id] || 0)} Tournament Points · hcp {player.h}{(() => { const ch = courseHcp(player.h, state); const d = ch - player.h; return (state.course && state.course.enabled && d !== 0) ? <span> → playing {ch} <span style={{ color: d > 0 ? C.birdie : C.bogeyBad }}>({d > 0 ? "+" : ""}{d})</span></span> : null; })()}</div>
           </div>
           <button style={S.xBtn} onClick={onClose}>✕</button>
         </div>
@@ -2662,10 +2746,10 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
                 let gross = "—", net = "—";
                 if (r.kind.includes("ryder")) {
                   // Ryder rounds: per-player gross/net only meaningful for singles (r2); scramble is a team card
-                  if (r.key === "r2" && thru) { const t = playerNetTotal(state.holes, rs, player.h); gross = t.gross; net = t.net; }
+                  if (r.key === "r2" && thru) { const t = playerNetTotal(state.holes, rs, effH(player, state)); gross = t.gross; net = t.net; }
                   else { gross = "—"; net = "team"; }
                 } else if (thru) {
-                  const t = playerNetTotal(state.holes, rs, player.h);
+                  const t = playerNetTotal(state.holes, rs, effH(player, state));
                   gross = t.gross; net = t.net;
                 }
                 // TP earned this round
@@ -2676,7 +2760,7 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
                 else if (r.key === "r1" || r.key === "r2") { const d = tp.detail.ryder; if (d && d.winners) earned = d.winners.includes(player.id) ? 2 : 0; }
                 return (
                   <div key={r.key} style={S.lbRow}>
-                    <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}<span style={{ display: "block", color: C.fescue, fontSize: 11 }}>{thru ? `thru ${thru}` : "not started"}{r.kind === "stableford" && thru ? ` · ${playerStbl(state.holes, rs, player.h, RZ(state)).pts} pts` : ""}</span></span>
+                    <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}<span style={{ display: "block", color: C.fescue, fontSize: 11 }}>{thru ? `thru ${thru}` : "not started"}{r.kind === "stableford" && thru ? ` · ${playerStbl(state.holes, rs, effH(player, state), RZ(state)).pts} pts` : ""}</span></span>
                     <span style={{ width: 56, textAlign: "right", fontFamily: SANS, color: C.cream, fontSize: 13 }}>{gross}</span>
                     <span style={{ width: 56, textAlign: "right", fontFamily: SANS, color: C.cream, fontSize: 13 }}>{net}</span>
                     <span style={{ width: 44, textAlign: "right", fontFamily: SANS, fontWeight: 700, color: earned ? C.copperLt : C.fescue, fontSize: 13 }}>{earned != null ? fmtTP(earned) : "—"}</span>
@@ -2925,7 +3009,7 @@ const S = {
   tab: { background: "none", border: "none", color: C.fescue, padding: "12px 14px", fontSize: 14, cursor: "pointer", fontFamily: SANS, borderBottom: "2px solid transparent", whiteSpace: "nowrap" },
   tabActive: { color: C.cream, borderBottom: `2px solid ${C.copperLt}` },
   main: { padding: "18px 16px", maxWidth: 680, margin: "0 auto", width: "100%" },
-  card: { background: C.glass, border: `1px solid ${C.glassBorder}`, borderRadius: 18, padding: 18, boxShadow: "0 8px 30px rgba(0,0,0,0.25)" },
+  card: { background: C.glass, border: `1px solid ${C.glassBorder}`, borderRadius: 18, padding: 18, boxShadow: "0 8px 30px rgba(0,0,0,0.25)", width: "100%", maxWidth: "100%", minWidth: 0, overflowWrap: "break-word" },
   myCard: { background: "linear-gradient(160deg, rgba(242,166,90,0.16), rgba(199,127,69,0.06))", border: "1px solid rgba(242,193,136,0.4)", borderRadius: 22, padding: 20, boxShadow: "0 10px 40px rgba(199,127,69,0.18)" },
   cardOpen: { background: "rgba(0,0,0,0.25)", border: `1px solid ${C.line}`, borderRadius: 12, padding: "10px 8px", margin: "4px 0 8px" },
   cardTitle: { fontSize: 19, fontWeight: 700, marginBottom: 4 },
