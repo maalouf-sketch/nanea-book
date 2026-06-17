@@ -49,22 +49,38 @@ const firstName = (p) => dispName(p).split(" ")[0];
 // ---- scoring helpers ----
 const strokesOnHole = (si, ph) => (ph >= si ? 1 : 0) + (ph >= si + 18 ? 1 : 0);
 const netHole = (g, si, ph) => g - strokesOnHole(si, ph);
-const stbl = (net, par) => { const d = net - par; return d <= -3 ? 5 : d === -2 ? 4 : d === -1 ? 3 : d === 0 ? 2 : d === 1 ? 1 : 0; };
+
+// ---- editable scoring rules (commish-configurable, with safe defaults) ----
+const RULES_DEFAULTS = {
+  finishTP: [7, 6, 5, 4, 3, 2, 1, 0],     // TP by finish position (1st..8th) for R3/R5/R6
+  stbl: { albatross: 5, eagle: 4, birdie: 3, par: 2, bogey: 1, double: 0 }, // net Stableford per hole
+  bestBallTP: 4,                            // TP to each player on a winning R4 pair
+  ryderTP: 2,                               // TP to each player on the winning Ryder team
+  scrambleLow: 35,                          // % of lower handicap in scramble blend
+  scrambleHigh: 15,                         // % of higher handicap in scramble blend
+};
+// Resolve rules from state with fallback to defaults (older saves may lack the field).
+const RZ = (state) => ({ ...RULES_DEFAULTS, ...(state?.rules || {}), stbl: { ...RULES_DEFAULTS.stbl, ...(state?.rules?.stbl || {}) } });
+
+const stbl = (net, par, rules = RULES_DEFAULTS) => {
+  const d = net - par; const s = rules.stbl || RULES_DEFAULTS.stbl;
+  return d <= -3 ? s.albatross : d === -2 ? s.eagle : d === -1 ? s.birdie : d === 0 ? s.par : d === 1 ? s.bogey : s.double;
+};
 
 function playerNetTotal(holes, scores, h) {
   let g = 0, n = 0, thru = 0;
   holes.forEach((H) => { const v = scores?.[H.hole]; if (v != null) { g += v; n += netHole(v, H.si, h); thru++; } });
   return { gross: g, net: n, thru };
 }
-function playerStbl(holes, scores, h) {
+function playerStbl(holes, scores, h, rules = RULES_DEFAULTS) {
   let pts = 0, thru = 0;
-  holes.forEach((H) => { const v = scores?.[H.hole]; if (v != null) { pts += stbl(netHole(v, H.si, h), H.par); thru++; } });
+  holes.forEach((H) => { const v = scores?.[H.hole]; if (v != null) { pts += stbl(netHole(v, H.si, h), H.par, rules); thru++; } });
   return { pts, thru };
 }
-// rank -> TP (7..0) with average tie-sharing
-function rankToTP(arr, higherBetter) {
+// rank -> TP with average tie-sharing
+function rankToTP(arr, higherBetter, finishTP = RULES_DEFAULTS.finishTP) {
   const s = [...arr].sort((a, b) => (higherBetter ? b.val - a.val : a.val - b.val));
-  const pts = [7, 6, 5, 4, 3, 2, 1, 0]; const out = {}; let i = 0;
+  const pts = finishTP; const out = {}; let i = 0;
   while (i < s.length) {
     let j = i; while (j + 1 < s.length && s[j + 1].val === s[i].val) j++;
     const share = pts.slice(i, j + 1).reduce((a, b) => a + b, 0) / (j - i + 1);
@@ -76,7 +92,7 @@ function rankToTP(arr, higherBetter) {
 
 // ---- Ryder match-play engine ----
 // Standard 2-person scramble team handicap: 35% low + 15% high, rounded.
-const scrambleTeamHcp = (h1, h2) => { const lo = Math.min(h1, h2), hi = Math.max(h1, h2); return Math.round(0.35 * lo + 0.15 * hi); };
+const scrambleTeamHcp = (h1, h2, low = RULES_DEFAULTS.scrambleLow, high = RULES_DEFAULTS.scrambleHigh) => { const lo = Math.min(h1, h2), hi = Math.max(h1, h2); return Math.round((low / 100) * lo + (high / 100) * hi); };
 
 // Compute live match-play status from two sides' per-hole NET scores.
 // xNet / yNet are objects keyed by hole number (or undefined if not entered).
@@ -114,6 +130,7 @@ const DEFAULT_STATE = {
   r4: { matches: [] }, // {id, xs:[id,id], ys:[id,id]}
   r6: { champ: [], losers: [], champWinner: "", loserLast: "" },
   manualTP: {}, // commissioner overrides id->delta (rare)
+  rules: RULES_DEFAULTS,
   markets: [], // betting markets: {id, title, kind, status:'open'|'settled', winnerId, options:[{id,label,odds,manual:bool}]}
   bets: [], // {id, who, marketId, optionId, label, stake, oddsAtBet, status, payout, ts}
 };
@@ -203,7 +220,7 @@ export default function App() {
       {profileFor && <ProfileModal state={state} tp={tp} playerId={profileFor} isMe={state.players.find((p) => p.id === profileFor)?.name === me} isCommish={isCommish} onClose={() => setProfileFor(null)} save={save} flash={flash} setName={setName} />}
 
       <nav style={S.tabs} className="nz-tabs">
-        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["ryder", "Ryder Cup"], ["rounds", "Rounds"], ["bets", "The Book"], ...(COMMISH_NAMES.includes(me) ? [["commish", "Commish"]] : [])].map(([k, lbl]) => (
+        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["ryder", "Ryder Cup"], ["rounds", "Rounds"], ["bets", "The Book"], ["rules", "Rules"], ...(COMMISH_NAMES.includes(me) ? [["commish", "Commish"]] : [])].map(([k, lbl]) => (
           <button key={k} onClick={() => setTab(k)} className="nz-tab" style={{ ...S.tab, ...(tab === k ? S.tabActive : {}) }}>{lbl}</button>
         ))}
       </nav>
@@ -214,6 +231,7 @@ export default function App() {
           {tab === "scoring" && <Scoring state={state} me={me} setName={setName} save={save} isCommish={isCommish} />}
           {tab === "ryder" && <RyderView state={state} tp={tp} />}
           {tab === "rounds" && <RoundsView state={state} tp={tp} />}
+          {tab === "rules" && <RulesView state={state} />}
           {tab === "bets" && <BookView state={state} tp={tp} me={me} setName={setName} save={save} flash={flash} />}
           {tab === "commish" && (COMMISH_NAMES.includes(me)
             ? (isCommish
@@ -236,6 +254,7 @@ function migrate(s) {
   merged.r4 = { ...base.r4, ...(s.r4 || {}) };
   merged.r6 = { ...base.r6, ...(s.r6 || {}) };
   merged.manualTP = s.manualTP || {};
+  merged.rules = { ...RULES_DEFAULTS, ...(s.rules || {}), stbl: { ...RULES_DEFAULTS.stbl, ...(s.rules?.stbl || {}) } };
   merged.markets = s.markets || [];
   merged.bets = s.bets || [];
   return merged;
@@ -248,6 +267,7 @@ function computeTP(state) {
   const tp = {}; state.players.forEach((p) => (tp[p.id] = 0));
   const P = (id) => state.players.find((x) => x.id === id);
   const holes = state.holes;
+  const R = RZ(state);
   const detail = { r1: null, r2: null, ryder: null, r3: {}, r4: [], r5: {}, r6: null };
 
   // ---- Ryder Cup (R1 scramble + R2 singles) — auto-calculated from scores ----
@@ -258,7 +278,6 @@ function computeTP(state) {
     const tallyMatch = (m, roundKey) => {
       const res = ryderMatchResult(holes, m, state, roundKey);
       matchResults[m.id] = res;
-      // xs are Team A, ys are Team B (built that way in commish).
       if (res.result === "X") { aPts += 1; }
       else if (res.result === "Y") { bPts += 1; }
       else if (res.result === "H") { aPts += 0.5; bPts += 0.5; }
@@ -271,16 +290,16 @@ function computeTP(state) {
     else if (bPts > aPts) winners = ry.teamB;
     else if (ry.playoff === "A") winners = ry.teamA;
     else if (ry.playoff === "B") winners = ry.teamB;
-    if (winners) winners.forEach((id) => (tp[id] += 2));
+    if (winners) winners.forEach((id) => (tp[id] += R.ryderTP));
     detail.ryder.winners = winners;
   }
 
   // ---- R3 Stableford ----
-  const r3vals = state.players.map((p) => ({ id: p.id, val: playerStbl(holes, p.scores.r3, p.h).pts, thru: playerStbl(holes, p.scores.r3, p.h).thru }));
+  const r3vals = state.players.map((p) => { const s = playerStbl(holes, p.scores.r3, p.h, R); return { id: p.id, val: s.pts, thru: s.thru }; });
   if (r3vals.some((v) => v.thru > 0)) {
     const done = r3vals.filter((v) => v.thru === 18);
     if (done.length === state.players.length) {
-      const map = rankToTP(r3vals.map((v) => ({ id: v.id, val: v.val })), true);
+      const map = rankToTP(r3vals.map((v) => ({ id: v.id, val: v.val })), true, R.finishTP);
       Object.entries(map).forEach(([id, v]) => (tp[id] += v));
       detail.r3 = map;
     }
@@ -290,13 +309,13 @@ function computeTP(state) {
   (state.r4.matches || []).forEach((m) => {
     const res = bestBallResult(holes, m, state);
     detail.r4.push(res);
-    if (res.winner) res.winner.forEach((id) => (tp[id] += 4));
+    if (res.winner) res.winner.forEach((id) => (tp[id] += R.bestBallTP));
   });
 
   // ---- R5 stroke ----
   const r5vals = state.players.map((p) => { const t = playerNetTotal(holes, p.scores.r5, p.h); return { id: p.id, val: t.net, thru: t.thru }; });
   if (r5vals.every((v) => v.thru === 18) && r5vals.length) {
-    const map = rankToTP(r5vals.map((v) => ({ id: v.id, val: v.val })), false);
+    const map = rankToTP(r5vals.map((v) => ({ id: v.id, val: v.val })), false, R.finishTP);
     Object.entries(map).forEach(([id, v]) => (tp[id] += v));
     detail.r5 = map;
   }
@@ -331,7 +350,7 @@ function ryderSideNet(holes, ids, state, roundKey, teamScores) {
   const out = {};
   if (roundKey === "r1") {
     const ts = teamScores || {};
-    const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 0);
+    const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? P(ids[0]).h : 0);
     holes.forEach((H) => {
       const g = ts[H.hole];
       out[H.hole] = g != null ? netHole(g, H.si, teamH) : null;
@@ -405,8 +424,8 @@ function RyderRoundBoard({ state, roundKey }) {
             </div>
             {roundKey === "r1" && m.xs.length === 2 && m.ys.length === 2 && (
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: SANS, fontSize: 11, color: C.fescue }}>
-                <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h)}</span>
-                <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h)}</span>
+                <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
+                <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
               </div>
             )}
             {openId === m.id && <div className="nz-expand"><RyderMatchScorecard state={state} m={m} roundKey={roundKey} nameA={nameA} nameB={nameB} /></div>}
@@ -506,8 +525,8 @@ function RyderView({ state, tp }) {
         </div>
         {roundKey === "r1" && m.xs.length === 2 && m.ys.length === 2 && (
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: SANS, fontSize: 11, color: C.fescue }}>
-            <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h)}</span>
-            <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h)}</span>
+            <span>scr. hcp {scrambleTeamHcp(P(m.xs[0]).h, P(m.xs[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
+            <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh)}</span>
           </div>
         )}
         {openId === m.id && <div className="nz-expand"><RyderMatchScorecard state={state} m={m} roundKey={roundKey} nameA={nameA} nameB={nameB} /></div>}
@@ -533,7 +552,7 @@ function RyderView({ state, tp }) {
             <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamB.map((id) => firstName(P(id))).join(", ")}</div>
           </div>
         </div>
-        <p style={{ ...S.hint, textAlign: "center" }}>First to 3½ of 6 points wins the Cup. Each player on the winning team earns 2 TP. {d && d.winners ? `${d.winners === ry.teamA ? nameA : nameB} has clinched.` : "3–3 goes to a captain playoff."}</p>
+        <p style={{ ...S.hint, textAlign: "center" }}>First to 3½ of 6 points wins the Cup. Each player on the winning team earns {RZ(state).ryderTP} TP. {d && d.winners ? `${d.winners === ry.teamA ? nameA : nameB} has clinched.` : "3–3 goes to a captain playoff."}</p>
       </div>
 
       <div className="nz-glass" style={S.card}>
@@ -601,7 +620,7 @@ function RyderBanner({ state, tp }) {
         </div>
       </div>
       {d.winners
-        ? <div style={{ textAlign: "center", color: C.birdie, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>{d.winners === state.ryder.teamA ? nameA : nameB} wins the Cup — each player on the team gets +2 TP</div>
+        ? <div style={{ textAlign: "center", color: C.birdie, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>{d.winners === state.ryder.teamA ? nameA : nameB} wins the Cup — each player on the team gets +{RZ(state).ryderTP} TP</div>
         : <div style={{ textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>{d.aPts === d.bPts && (d.aPts + d.bPts) > 0 ? "All square — captain playoff needed" : "In progress"}</div>}
       <p style={{ ...S.hint, textAlign: "center" }}>6 points across the 2 scramble + 4 singles matches combined. Win the majority and every player on the winning team earns 2 Tournament Points — one team prize for the combined result, not 2 per match.</p>
     </div>
@@ -678,7 +697,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
     const t = playerNetTotal(holes, rs, p.h);
     const toPar = t.thru ? t.net - parThru(rs) : null;
     if (round.kind === "stableford") {
-      const s = playerStbl(holes, rs, p.h);
+      const s = playerStbl(holes, rs, p.h, RZ(state));
       return { p, sortVal: s.pts, thru: s.thru, gross: t.gross, net: t.net, toPar, stbl: s.pts, higher: true };
     }
     return { p, sortVal: t.net, thru: t.thru, gross: t.gross, net: t.net, toPar, stbl: null, higher: false };
@@ -704,7 +723,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
           ? <ScrambleTeamCard state={state} holes={holes} match={myMatch} side={mySide} setTeamScore={setTeamScore} submitTeam={submitTeam} isSubmitted={teamSubmitted} />
           : <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Scramble — Round 1</div><p style={S.hint}>You're not in a scramble match yet. The commissioner sets the R1 pairings in Commish → Ryder R1–2.</p></div>
       )}
-      {myPlayer && roundKey !== "r1" && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} />}
+      {myPlayer && roundKey !== "r1" && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} rules={RZ(state)} />}
 
       {round.kind.includes("ryder") ? (
         <RyderRoundBoard state={state} roundKey={roundKey} />
@@ -786,7 +805,7 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore, submitTeam,
   const ids = side === "x" ? match.xs : match.ys;
   const oppIds = side === "x" ? match.ys : match.xs;
   const scores = (side === "x" ? match.xScores : match.yScores) || {};
-  const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 0);
+  const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? P(ids[0]).h : 0);
   const teamNames = ids.map((id) => dispName(P(id))).filter(Boolean).join(" & ");
   const oppNames = oppIds.map((id) => dispName(P(id))).filter(Boolean).join(" & ");
 
@@ -851,7 +870,7 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore, submitTeam,
   );
 }
 
-function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmitted }) {
+function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmitted, rules = RULES_DEFAULTS }) {
   const rs = player.scores[roundKey] || {};
   const thru = holes.filter((H) => rs[H.hole] != null).length;
   const nextHole = thru >= 18 ? 18 : (() => { const miss = holes.find((H) => rs[H.hole] == null); return miss ? miss.hole : 18; })();
@@ -860,7 +879,7 @@ function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmi
   const H = holes.find((x) => x.hole === h);
   const cur = rs[h];
   const strokes = strokesOnHole(H.si, player.h);
-  const t = round.kind === "stableford" ? playerStbl(holes, rs, player.h).pts : playerNetTotal(holes, rs, player.h).net;
+  const t = round.kind === "stableford" ? playerStbl(holes, rs, player.h, rules).pts : playerNetTotal(holes, rs, player.h).net;
 
   // Soft lock: when submitted, editing a hole asks for confirmation first.
   const guardedSetScore = (pid, hole, val) => {
@@ -933,6 +952,77 @@ const scoreColor = (diff) =>
   : { background: "linear-gradient(135deg,#D2553A,#A23420)", color: "#fff", borderColor: "transparent" };
 
 // ============================================================
+// RULES — plain-English explanation of every format + scoring
+// ============================================================
+function RulesView({ state }) {
+  const nameA = state.ryder.teamAName || "Team A";
+  const nameB = state.ryder.teamBName || "Team B";
+  const R = RZ(state);
+  const finishStr = R.finishTP.map((v, i) => `${i + 1}${["st","nd","rd"][i] || "th"} = ${v}`).join(", ");
+  const Rule = ({ tag, title, children }) => (
+    <div className="nz-glass" style={S.card}>
+      <div style={S.cardTop}><span style={S.kindTag}>{tag}</span></div>
+      <div style={S.cardTitle}>{title}</div>
+      <div style={{ fontFamily: SANS, fontSize: 14, color: C.cream, lineHeight: 1.6, marginTop: 6 }}>{children}</div>
+    </div>
+  );
+  const StblRow = ({ s, label }) => (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${C.line}` }}>
+      <span>{label}</span><span style={{ fontFamily: SANS, fontWeight: 700, color: C.copperLt }}>{s} pt{s === 1 ? "" : "s"}</span>
+    </div>
+  );
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Rule tag="OVERVIEW" title="How the Tournament Works">
+        Six rounds, all played on a <b>net</b> basis (your handicap evens the field). Each round awards <b>Tournament Points (TP)</b>. Add up your TP across all six rounds — most points at the end wins the whole thing. The standings tab tracks the running total.
+      </Rule>
+
+      <Rule tag="ROUNDS 1–2" title="Ryder Cup (Scramble + Singles)">
+        The field splits into two teams, {nameA} vs {nameB}. <b>Round 1</b> is 2v2 scramble match play (each pair plays one ball, best of the two on each hole). <b>Round 2</b> is 1v1 singles match play. Together these are worth <b>6 points</b> (2 scramble matches + 4 singles). Whichever team wins the majority takes the Cup, and <b>every player on the winning team gets {R.ryderTP} TP</b> — it's one team prize for the combined result, not points per match. A 3–3 tie goes to a captain playoff.
+        <div style={{ marginTop: 8, color: C.fescue, fontSize: 13 }}>Match play = won hole by hole. "3&2" means 3 holes up with 2 to play — the match is over.</div>
+      </Rule>
+
+      <Rule tag="ROUND 3" title="Net Stableford">
+        Stableford scores each hole by how you did against par on a <b>net</b> basis (after your handicap strokes). Higher is better. Your points decide your <b>finish position</b>, and position sets your TP (see below). Per-hole points:
+        <div style={{ marginTop: 10 }}>
+          <StblRow s={R.stbl.albatross} label="Albatross or better (3+ under net)" />
+          <StblRow s={R.stbl.eagle} label="Eagle (2 under net)" />
+          <StblRow s={R.stbl.birdie} label="Birdie (1 under net)" />
+          <StblRow s={R.stbl.par} label="Par (net)" />
+          <StblRow s={R.stbl.bogey} label="Bogey (1 over net)" />
+          <StblRow s={R.stbl.double} label="Double bogey or worse" />
+        </div>
+        <div style={{ marginTop: 10, color: C.fescue, fontSize: 13 }}>Example: net birdie on a hole = {R.stbl.birdie} points. Add up all 18. Most total points finishes 1st.</div>
+      </Rule>
+
+      <Rule tag="ROUND 4" title="Best Ball Match Play (2v2)">
+        Pairs are set from the standings: <b>1st + 8th vs 4th + 5th</b>, and <b>2nd + 7th vs 3rd + 6th</b>. On each hole, each team takes its <b>better net ball</b>; lower net wins the hole. It's match play (holes up/down). <b>Each player on a winning pair earns {R.bestBallTP} TP.</b>
+      </Rule>
+
+      <Rule tag="ROUND 5" title="Net Stroke Play">
+        Straight net stroke play — lowest net total over 18 holes finishes 1st. Position sets your TP.
+      </Rule>
+
+      <Rule tag="ROUND 6" title="Championship Final">
+        Final groups are set by standings: the <b>top 4 in TP</b> play the Championship group, the <b>bottom 4</b> play the Losers group. Net stroke play. <b>Lowest net in the Championship group wins the tournament.</b> Highest net in the Losers group is the official "loser."
+      </Rule>
+
+      <Rule tag="POINTS" title="Tournament Points by Finish">
+        Rounds 3, 5, and 6 award TP by finish position: <b>{finishStr}</b>. Ties split the points evenly. Round 4 best ball awards {R.bestBallTP} TP to each winning player; the Ryder Cup awards {R.ryderTP} TP to each player on the winning team.
+      </Rule>
+
+      <Rule tag="HANDICAPS" title="Net Scoring & Scramble Handicaps">
+        Everything is net: you get strokes on the hardest holes based on your handicap, so a high-handicapper and a low-handicapper compete fairly. For the Round 1 scramble, each pair plays off a blended team handicap: <b>{R.scrambleLow}% of the lower handicap + {R.scrambleHigh}% of the higher</b>, rounded.
+      </Rule>
+
+      <Rule tag="THE BOOK" title="Betting">
+        Friendly wagers with auto-generated odds that move with handicaps and live position. Your bet locks at the odds shown when you place it. Markets close automatically once an outcome is decided, and the commissioner can pause the book anytime. Settle up at the clubhouse.
+      </Rule>
+    </div>
+  );
+}
+
+// ============================================================
 // ROUNDS VIEW — read-only summary of each round's format + result
 // ============================================================
 function RoundsView({ state, tp }) {
@@ -959,7 +1049,7 @@ function RoundDetail({ r, state, tp, ranked }) {
     const ms = r.key === "r1" ? state.ryder.r1 : state.ryder.r2;
     if (!state.ryder.teamA.length) return <p style={S.hint}>Teams not set yet — commissioner assigns Team A / Team B.</p>;
     return <div style={{ marginTop: 8 }}>
-      <p style={S.hint}>Auto-scored from each player's hole scores. Counts toward the combined Ryder Cup (6 points across both rounds). Win the majority and each player on the winning team gets 2 TP.</p>
+      <p style={S.hint}>Auto-scored from each player's hole scores. Counts toward the combined Ryder Cup (6 points across both rounds). Win the majority and each player on the winning team gets {RZ(state).ryderTP} TP.</p>
       {(ms || []).map((m) => {
         const res = ryderMatchResult(state.holes, m, state, r.key);
         const color = res.result === "X" ? C.birdie : res.result === "Y" ? C.ocean : res.result === "H" ? C.fescue : C.copperLt;
@@ -1001,11 +1091,24 @@ function RoundDetail({ r, state, tp, ranked }) {
   }
   if (r.key === "r6") {
     if (!state.r6.champ.length) return <p style={S.hint}>Final groups set after R5 — top 4 in the Championship group, bottom 4 in the Losers group.</p>;
+    const parThru6 = (rs) => state.holes.reduce((s, H) => s + (rs[H.hole] != null ? H.par : 0), 0);
+    const groupRows = (ids) => ids.map((id) => {
+      const pl = P(id); const rs = pl?.scores.r6 || {}; const t = playerNetTotal(state.holes, rs, pl?.h);
+      return { id, name: dispName(pl), thru: t.thru, gross: t.gross, net: t.net, toPar: t.thru ? t.net - parThru6(rs) : null };
+    }).sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return a.net - b.net; });
+    const Head = () => <div style={{ ...S.lbRow, ...S.lbHead }}><span style={{ flex: 1 }}>Player</span><span style={{ width: 52, textAlign: "right" }}>Gross</span><span style={{ width: 52, textAlign: "right" }}>Net</span></div>;
+    const GroupRow = ({ g }) => (
+      <div style={S.matchRow}>
+        <span style={{ flex: 1 }}>{g.name}</span>
+        <span style={{ width: 52, textAlign: "right", fontFamily: SANS, color: C.cream }}>{g.thru ? g.gross : "—"}</span>
+        <span style={{ width: 52, textAlign: "right", fontFamily: SANS, fontWeight: 800, color: g.toPar == null ? C.fescue : g.toPar < 0 ? C.birdie : g.toPar > 0 ? C.copperLt : C.cream }}>{g.thru ? relToPar(g.toPar) : "—"}</span>
+      </div>
+    );
     return <div style={{ marginTop: 8 }}>
-      <div style={{ color: C.copperLt, fontFamily: SANS, fontSize: 12, letterSpacing: 1 }}>CHAMPIONSHIP</div>
-      {state.r6.champ.map((id) => <div key={id} style={S.matchRow}><span>{dispName(P(id))}</span><span style={{ fontFamily: SANS, color: C.fescue }}>{playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).thru === 18 ? playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).net + " net" : "—"}</span></div>)}
-      <div style={{ color: C.fescue, fontFamily: SANS, fontSize: 12, letterSpacing: 1, marginTop: 8 }}>LOSERS</div>
-      {state.r6.losers.map((id) => <div key={id} style={S.matchRow}><span>{dispName(P(id))}</span><span style={{ fontFamily: SANS, color: C.fescue }}>{playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).thru === 18 ? playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).net + " net" : "—"}</span></div>)}
+      <div style={{ color: C.copperLt, fontFamily: SANS, fontSize: 12, letterSpacing: 1 }}>🏆 CHAMPIONSHIP · low net wins</div>
+      <Head />{groupRows(state.r6.champ).map((g) => <GroupRow key={g.id} g={g} />)}
+      <div style={{ color: C.fescue, fontFamily: SANS, fontSize: 12, letterSpacing: 1, marginTop: 12 }}>LOSERS · high net is the loser</div>
+      <Head />{groupRows(state.r6.losers).map((g) => <GroupRow key={g.id} g={g} />)}
     </div>;
   }
   // stableford / stroke ranking preview
@@ -1014,7 +1117,7 @@ function RoundDetail({ r, state, tp, ranked }) {
   const vals = state.players.map((p) => {
     const rs = p.scores[r.key] || {};
     const t = playerNetTotal(state.holes, rs, p.h);
-    const stbl = isStbl ? playerStbl(state.holes, rs, p.h) : null;
+    const stbl = isStbl ? playerStbl(state.holes, rs, p.h, RZ(state)) : null;
     return { id: p.id, sortVal: isStbl ? stbl.pts : t.net, thru: t.thru, gross: t.gross, net: t.net, toPar: t.thru ? t.net - parThru(rs) : null, pts: stbl ? stbl.pts : null };
   });
   const any = vals.some((v) => v.thru > 0);
@@ -1043,7 +1146,7 @@ function RoundDetail({ r, state, tp, ranked }) {
 // ============================================================
 // Commish-owned fields that Save commits. Player scores + bets are NOT here —
 // they stay live and are preserved on merge so a Save never wipes them.
-const COMMISH_FIELDS = ["tournamentName", "holes", "ryder", "r4", "r6", "manualTP", "markets"];
+const COMMISH_FIELDS = ["tournamentName", "holes", "ryder", "r4", "r6", "manualTP", "markets", "rules"];
 
 // Merge a commish draft onto the freshest live state without clobbering live scores/bets.
 function mergeCommishDraft(latest, draft) {
@@ -1104,7 +1207,7 @@ function Commish({ state, save, flash, tp }) {
     <div style={{ display: "grid", gap: 16, paddingBottom: dirty ? 72 : 0 }}>
       <div className="nz-glass" style={S.card}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {[["setup", "Setup"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["clear", "Clear Scores"], ["tp", "TP Override"]].map(([k, l]) => (
+          {[["setup", "Setup"], ["rules", "Scoring Rules"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["clear", "Clear Scores"], ["tp", "TP Override"]].map(([k, l]) => (
             <button key={k} onClick={() => setSection(k)} style={{ ...S.roundPill, ...(section === k ? S.roundPillOn : {}) }}>{l}</button>
           ))}
         </div>
@@ -1112,6 +1215,7 @@ function Commish({ state, save, flash, tp }) {
       </div>
 
       {section === "setup" && <CommishSetup state={draft} save={draftSave} flash={flash} />}
+      {section === "rules" && <CommishRules state={draft} save={draftSave} flash={flash} />}
       {section === "ryder" && <CommishRyder state={draft} save={draftSave} flash={flash} />}
       {section === "r4" && <CommishR4 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
       {section === "r6" && <CommishR6 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
@@ -1127,6 +1231,87 @@ function Commish({ state, save, flash, tp }) {
         </div>
       )}
     </div>
+  );
+}
+
+function CommishRules({ state, save, flash }) {
+  const R = RZ(state);
+  const setRules = (patch) => save({ ...state, rules: { ...R, ...patch } });
+  const setFinish = (i, val) => { const arr = [...R.finishTP]; arr[i] = parseFloat(val) || 0; setRules({ finishTP: arr }); };
+  const setStbl = (k, val) => setRules({ stbl: { ...R.stbl, [k]: parseFloat(val) || 0 } });
+  const resetAll = () => { if (!window.confirm("Reset all scoring rules to the original defaults?")) return; save({ ...state, rules: JSON.parse(JSON.stringify(RULES_DEFAULTS)) }); flash("Rules reset to defaults."); };
+  const NumF = ({ value, onChange, w = 56 }) => (
+    <input className="nz-input" style={{ ...S.input, width: w, textAlign: "center" }} type="number" step="0.5" defaultValue={value} onBlur={(e) => onChange(e.target.value)} />
+  );
+  const ordinal = (i) => `${i + 1}${["st", "nd", "rd"][i] || "th"}`;
+  return (
+    <>
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Scoring Rules</div>
+        <p style={S.hint}>Change how points are awarded. Edits are held as a draft until you press <b>Save</b> at the bottom — then they go live and the Rules tab updates to match. Defaults shown in grey.</p>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>TP by Finish Position</div>
+        <p style={S.hint}>Points for each finishing place in Rounds 3, 5 and 6. Ties split evenly.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 10 }}>
+          {R.finishTP.map((v, i) => (
+            <div key={i} style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS, marginBottom: 3 }}>{ordinal(i)} <span style={{ opacity: 0.6 }}>({RULES_DEFAULTS.finishTP[i]})</span></div>
+              <NumF value={v} onChange={(val) => setFinish(i, val)} w="100%" />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Stableford Points (per hole, net)</div>
+        <p style={S.hint}>Points earned on each hole vs. net par in Round 3.</p>
+        <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+          {[["albatross", "Albatross+ (3+ under)"], ["eagle", "Eagle (2 under)"], ["birdie", "Birdie (1 under)"], ["par", "Par"], ["bogey", "Bogey (1 over)"], ["double", "Double+ (2+ over)"]].map(([k, label]) => (
+            <div key={k} style={{ ...S.lbRow, alignItems: "center" }}>
+              <span style={{ flex: 1 }}>{label} <span style={{ color: C.fescue, fontSize: 12 }}>(default {RULES_DEFAULTS.stbl[k]})</span></span>
+              <NumF value={R.stbl[k]} onChange={(val) => setStbl(k, val)} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Match-Play TP Values</div>
+        <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+          <div style={{ ...S.lbRow, alignItems: "center" }}>
+            <span style={{ flex: 1 }}>Round 4 best ball — per winning player <span style={{ color: C.fescue, fontSize: 12 }}>(default {RULES_DEFAULTS.bestBallTP})</span></span>
+            <NumF value={R.bestBallTP} onChange={(val) => setRules({ bestBallTP: parseFloat(val) || 0 })} />
+          </div>
+          <div style={{ ...S.lbRow, alignItems: "center" }}>
+            <span style={{ flex: 1 }}>Ryder Cup — per player on winning team <span style={{ color: C.fescue, fontSize: 12 }}>(default {RULES_DEFAULTS.ryderTP})</span></span>
+            <NumF value={R.ryderTP} onChange={(val) => setRules({ ryderTP: parseFloat(val) || 0 })} />
+          </div>
+        </div>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Scramble Handicap Blend</div>
+        <p style={S.hint}>Round 1 team handicap = (low% × lower handicap) + (high% × higher handicap), rounded. Defaults 35% / 15%.</p>
+        <div style={{ display: "flex", gap: 14, marginTop: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS, marginBottom: 3 }}>Lower handicap % <span style={{ opacity: 0.6 }}>(35)</span></div>
+            <NumF value={R.scrambleLow} onChange={(val) => setRules({ scrambleLow: parseFloat(val) || 0 })} w="100%" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS, marginBottom: 3 }}>Higher handicap % <span style={{ opacity: 0.6 }}>(15)</span></div>
+            <NumF value={R.scrambleHigh} onChange={(val) => setRules({ scrambleHigh: parseFloat(val) || 0 })} w="100%" />
+          </div>
+        </div>
+      </div>
+
+      <div className="nz-glass" style={{ ...S.card, border: "1px solid rgba(224,117,85,0.4)" }}>
+        <div style={S.cardTitle}>Reset</div>
+        <p style={S.hint}>Put every scoring rule back to the original defaults. (Still a draft until you Save.)</p>
+        <button style={{ ...S.miniGhost, padding: "10px 16px", marginTop: 8, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }} onClick={resetAll}>Reset all rules to defaults</button>
+      </div>
+    </>
   );
 }
 
@@ -1447,7 +1632,7 @@ function currentLiveRound(state) {
 // side pulls away (4-5 up). Money on a side shades the line toward it.
 function autoOddsForMatch(state, m, roundKey, marketId) {
   const P = (id) => state.players.find((x) => x.id === id);
-  const sideH = (ids) => ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 18);
+  const sideH = (ids) => ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h, RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? P(ids[0]).h : 18);
   const xs = roundKey === "r1" ? sideH(m.xs) : P(m.xs[0]).h;
   const ys = roundKey === "r1" ? sideH(m.ys) : P(m.ys[0]).h;
   // baseline handicap strength (small spread; temp 5 keeps it modest)
@@ -2149,7 +2334,7 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
                 else if (r.key === "r1" || r.key === "r2") { const d = tp.detail.ryder; if (d && d.winners) earned = d.winners.includes(player.id) ? 2 : 0; }
                 return (
                   <div key={r.key} style={S.lbRow}>
-                    <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}<span style={{ display: "block", color: C.fescue, fontSize: 11 }}>{thru ? `thru ${thru}` : "not started"}{r.kind === "stableford" && thru ? ` · ${playerStbl(state.holes, rs, player.h).pts} pts` : ""}</span></span>
+                    <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}<span style={{ display: "block", color: C.fescue, fontSize: 11 }}>{thru ? `thru ${thru}` : "not started"}{r.kind === "stableford" && thru ? ` · ${playerStbl(state.holes, rs, player.h, RZ(state)).pts} pts` : ""}</span></span>
                     <span style={{ width: 56, textAlign: "right", fontFamily: SANS, color: C.cream, fontSize: 13 }}>{gross}</span>
                     <span style={{ width: 56, textAlign: "right", fontFamily: SANS, color: C.cream, fontSize: 13 }}>{net}</span>
                     <span style={{ width: 44, textAlign: "right", fontFamily: SANS, fontWeight: 700, color: earned ? C.copperLt : C.fescue, fontSize: 13 }}>{earned != null ? fmtTP(earned) : "—"}</span>
