@@ -480,10 +480,10 @@ function RyderMatchScorecard({ state, m, roundKey, nameA, nameB }) {
   };
   const xG = sideGross(m.xs, m.xScores), yG = sideGross(m.ys, m.yScores);
 
-  const Row = ({ label, vals, net, color }) => (
-    <tr><td style={S.scLbl}>{label}</td>{holes.map((H) => {
+  const Row = ({ label, vals, net, color, fit }) => (
+    <tr><td style={fit ? S.scLblFit : S.scLbl}>{label}</td>{holes.map((H) => {
       const v = vals[H.hole];
-      return <td key={H.hole} style={{ ...S.scVal, color: v == null ? C.fescue : color }}>{v == null ? "·" : v}</td>;
+      return <td key={H.hole} style={{ ...(fit ? S.scValFit : S.scVal), color: v == null ? C.fescue : color }}>{v == null ? "·" : v}</td>;
     })}</tr>
   );
   // who won each hole (by net) for a highlight row
@@ -491,18 +491,16 @@ function RyderMatchScorecard({ state, m, roundKey, nameA, nameB }) {
 
   return (
     <div style={S.cardOpen}>
-      <div className="nz-xscroll">
-        <table style={{ ...S.scTable, minWidth: 560 }}><tbody>
-          <tr><td style={S.scLbl}>Hole</td>{holes.map((H) => <td key={H.hole} style={S.scH}>{H.hole}</td>)}</tr>
-          <tr><td style={S.scLbl}>Par</td>{holes.map((H) => <td key={H.hole} style={S.scPar}>{H.par}</td>)}</tr>
-          <Row label={`${nameA} gross`} vals={xG} color={C.cream} />
-          <Row label={`${nameA} net`} vals={xNet} color={C.birdie} />
-          <Row label={`${nameB} gross`} vals={yG} color={C.cream} />
-          <Row label={`${nameB} net`} vals={yNet} color={C.ocean} />
-          <tr><td style={S.scLbl}>Hole won</td>{winRow.map((w, i) => <td key={i} style={{ ...S.scVal, fontWeight: 800, color: w === "A" ? C.birdie : w === "B" ? C.ocean : C.fescue }}>{w || "·"}</td>)}</tr>
-        </tbody></table>
-      </div>
-      <p style={{ ...S.hint, marginTop: 4 }}>{roundKey === "r1" ? "Scramble: one team score per hole, net off the blended team handicap." : "Singles: each player's net. 'Hole won' shows who took each hole."}</p>
+      <table style={{ ...S.scTable, ...S.scTableFit }}><tbody>
+        <tr><td style={S.scLblFit}>Hole</td>{holes.map((H) => <td key={H.hole} style={S.scHFit}>{H.hole}</td>)}</tr>
+        <tr><td style={S.scLblFit}>Par</td>{holes.map((H) => <td key={H.hole} style={S.scParFit}>{H.par}</td>)}</tr>
+        <Row label={`${nameA} G`} vals={xG} color={C.cream} fit />
+        <Row label={`${nameA} N`} vals={xNet} color={C.birdie} fit />
+        <Row label={`${nameB} G`} vals={yG} color={C.cream} fit />
+        <Row label={`${nameB} N`} vals={yNet} color={C.ocean} fit />
+        <tr><td style={S.scLblFit}>Won</td>{winRow.map((w, i) => <td key={i} style={{ ...S.scValFit, fontWeight: 800, color: w === "A" ? C.birdie : w === "B" ? C.ocean : C.fescue }}>{w || "·"}</td>)}</tr>
+      </tbody></table>
+      <p style={{ ...S.hint, marginTop: 4 }}>{roundKey === "r1" ? "Scramble: one team score per hole, net off the blended team handicap. G = gross, N = net." : "Singles: each player's net. 'Won' shows who took each hole. G = gross, N = net."}</p>
     </div>
   );
 }
@@ -960,15 +958,13 @@ function Scorecard({ player, holes, roundKey }) {
   const front = holes.slice(0, 9), back = holes.slice(9);
   const sumNet = (arr) => arr.reduce((s, H) => s + (rs[H.hole] != null ? netHole(rs[H.hole], H.si, player.h) : 0), 0);
   const Nine = ({ hs, label }) => (
-    <div className="nz-xscroll">
-      <table style={S.scTable}><tbody>
-        <tr><td style={S.scLbl}>Hole</td>{hs.map((H) => <td key={H.hole} style={S.scH}>{H.hole}</td>)}<td style={S.scTot}>{label}</td></tr>
-        <tr><td style={S.scLbl}>Par</td>{hs.map((H) => <td key={H.hole} style={S.scPar}>{H.par}</td>)}<td style={S.scTot}>{hs.reduce((s, H) => s + H.par, 0)}</td></tr>
-        <tr><td style={S.scLbl}>Net</td>{hs.map((H) => { const v = rs[H.hole]; const net = v != null ? netHole(v, H.si, player.h) : null; const diff = net != null ? net - H.par : null;
-          return <td key={H.hole} style={{ padding: "2px 1px" }}><div style={{ ...S.scVal, ...(diff != null ? scoreColor(diff) : {}) }}>{net ?? "·"}</div></td>; })}
-          <td style={{ ...S.scTot, color: C.copperLt }}>{sumNet(hs) || "·"}</td></tr>
-      </tbody></table>
-    </div>
+    <table style={{ ...S.scTable, ...S.scTableFit, marginBottom: 8 }}><tbody>
+      <tr><td style={S.scLblFit}>Hole</td>{hs.map((H) => <td key={H.hole} style={S.scHFit}>{H.hole}</td>)}<td style={{ ...S.scHFit, color: C.cream, fontWeight: 700, borderLeft: `1px solid ${C.line}` }}>{label}</td></tr>
+      <tr><td style={S.scLblFit}>Par</td>{hs.map((H) => <td key={H.hole} style={S.scParFit}>{H.par}</td>)}<td style={{ ...S.scParFit, borderLeft: `1px solid ${C.line}` }}>{hs.reduce((s, H) => s + H.par, 0)}</td></tr>
+      <tr><td style={S.scLblFit}>Net</td>{hs.map((H) => { const v = rs[H.hole]; const net = v != null ? netHole(v, H.si, player.h) : null; const diff = net != null ? net - H.par : null;
+        return <td key={H.hole} style={{ padding: "1px" }}><div style={{ ...S.scValFit, borderRadius: 4, ...(diff != null ? scoreColor(diff) : {}) }}>{net ?? "·"}</div></td>; })}
+        <td style={{ ...S.scValFit, color: C.copperLt, borderLeft: `1px solid ${C.line}` }}>{sumNet(hs) || "·"}</td></tr>
+    </tbody></table>
   );
   return <div style={S.cardOpen}><Nine hs={front} label="OUT" /><Nine hs={back} label="IN" /></div>;
 }
@@ -2755,6 +2751,11 @@ const S = {
   scoreBtn: { width: 40, height: 46, borderRadius: 12, background: "rgba(255,255,255,0.06)", color: C.cream, border: `1px solid ${C.glassBorder}`, fontSize: 17, fontWeight: 700, cursor: "pointer", fontFamily: SANS },
   clearBtn: { background: "none", border: "none", color: C.bogeyBad, textDecoration: "underline", cursor: "pointer", fontFamily: SANS, fontSize: 13 },
   scTable: { borderCollapse: "collapse", width: "100%", marginBottom: 6, fontFamily: SANS },
+  scTableFit: { tableLayout: "fixed", width: "100%" },
+  scLblFit: { fontSize: 8.5, color: C.fescue, textAlign: "left", padding: "2px 2px 2px 0", textTransform: "uppercase", whiteSpace: "nowrap", width: 52, overflow: "hidden", textOverflow: "ellipsis" },
+  scHFit: { fontSize: 9, color: C.fescue, textAlign: "center", padding: "2px 0" },
+  scParFit: { fontSize: 9, color: C.copperLt, textAlign: "center", padding: "2px 0" },
+  scValFit: { fontSize: 10, fontWeight: 700, textAlign: "center", padding: "2px 0" },
   scLbl: { fontSize: 10, color: C.fescue, textAlign: "left", padding: "3px 6px 3px 2px", textTransform: "uppercase", whiteSpace: "nowrap" },
   scH: { fontSize: 11, color: C.fescue, textAlign: "center", padding: "3px 0", minWidth: 22 },
   scPar: { fontSize: 11, color: C.copperLt, textAlign: "center", padding: "3px 0" },
