@@ -1276,15 +1276,49 @@ function autoOddsByTP(state, tp) {
   return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i])) }));
 }
 
+// Two-way odds for a single Ryder match, priced off the sides' (net) handicap strength.
+// For scramble we use the blended team handicaps; for singles the players' handicaps.
+function autoOddsForMatch(state, m, roundKey) {
+  const P = (id) => state.players.find((x) => x.id === id);
+  const sideH = (ids) => ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 18);
+  // lower handicap = stronger. Convert to strength = -handicap.
+  const xs = roundKey === "r1" ? sideH(m.xs) : P(m.xs[0]).h;
+  const ys = roundKey === "r1" ? sideH(m.ys) : P(m.ys[0]).h;
+  const probs = softmax([-xs, -ys], 5); // temp 5 keeps a single match from being a blowout line
+  const label = (ids) => ids.map((id) => P(id)?.name.split(" ")[0]).join(" & ");
+  return [
+    { optionId: "X_" + m.id, label: label(m.xs), odds: withVig(probToAmerican(probs[0])), manual: false },
+    { optionId: "Y_" + m.id, label: label(m.ys), odds: withVig(probToAmerican(probs[1])), manual: false },
+  ];
+}
+
+// Over/Under on Team A's total Ryder points (0–6). Line set at 3 (the midpoint).
+function autoOddsOverUnder(state, tp) {
+  // estimate Team A strength vs B from combined handicaps; closer teams -> ~even O/U
+  const P = (id) => state.players.find((x) => x.id === id);
+  const sumH = (ids) => ids.reduce((s, id) => s + (P(id)?.h || 0), 0);
+  const aStr = -sumH(state.ryder.teamA), bStr = -sumH(state.ryder.teamB);
+  const probs = softmax([aStr, bStr], 14); // gentle
+  // P(over 3) ~ P(team A strong). Clamp to readable.
+  return [
+    { optionId: "over", label: "Over 3.5", odds: withVig(probToAmerican(probs[0])), manual: false },
+    { optionId: "under", label: "Under 3.5", odds: withVig(probToAmerican(probs[1])), manual: false },
+  ];
+}
+
 // Regenerate odds for a market if it's auto (not manually pinned).
 function refreshedOptions(market, state, tp) {
   if (market.kind === "outright" || market.kind === "next_round") {
     const auto = autoOddsByTP(state, tp);
-    return market.options.map((o) => {
-      if (o.manual) return o; // commissioner pinned this line
-      const a = auto.find((x) => x.id === o.optionId);
-      return a ? { ...o, odds: a.odds } : o;
-    });
+    return market.options.map((o) => o.manual ? o : (auto.find((x) => x.id === o.optionId) ? { ...o, odds: auto.find((x) => x.id === o.optionId).odds } : o));
+  }
+  if (market.kind === "match" && market.matchRef) {
+    const m = [...(state.ryder.r1 || []), ...(state.ryder.r2 || [])].find((x) => x.id === market.matchRef.id);
+    if (m) { const auto = autoOddsForMatch(state, m, market.matchRef.roundKey); return market.options.map((o) => o.manual ? o : (auto.find((a) => a.optionId === o.optionId) ? { ...o, odds: auto.find((a) => a.optionId === o.optionId).odds } : o)); }
+  }
+  if (market.kind === "overunder") {
+    const auto = autoOddsOverUnder(state, tp);
+    return market.options.map((o) => o.manual ? o : (auto.find((a) => a.optionId === o.optionId) ? { ...o, odds: auto.find((a) => a.optionId === o.optionId).odds } : o));
   }
   return market.options;
 }
@@ -1323,26 +1357,77 @@ function BookView({ state, tp, me, setName, save, flash }) {
 
       {!openMarkets.length && <Empty msg="No betting lines open yet. The commissioner opens markets — odds move automatically as scores and points change." />}
 
+      {me && (() => {
+        const mine = state.bets.filter((b) => b.who === me);
+        if (!mine.length) return null;
+        const open = mine.filter((b) => b.status === "pending");
+        const won = mine.filter((b) => b.status === "won");
+        const lost = mine.filter((b) => b.status === "lost");
+        const atRisk = open.reduce((s, b) => s + b.stake, 0);
+        const toWin = open.reduce((s, b) => s + (b.payout - b.stake), 0);
+        const net = won.reduce((s, b) => s + (b.payout - b.stake), 0) - lost.reduce((s, b) => s + b.stake, 0);
+        const Line = ({ b }) => (
+          <div style={S.openBetRow}>
+            <span style={{ flex: 1 }}>{b.label}</span>
+            <span style={{ fontFamily: SANS, color: b.status === "won" ? C.birdie : b.status === "lost" ? C.bogeyBad : C.copperLt }}>
+              ${b.stake} @ {b.oddsAtBet > 0 ? `+${b.oddsAtBet}` : b.oddsAtBet}{b.status === "won" ? ` · +$${(b.payout - b.stake).toFixed(2)}` : b.status === "lost" ? " · lost" : ""}
+            </span>
+          </div>
+        );
+        return (
+          <div className="nz-glass" style={S.card}>
+            <div style={S.cardTitle}>My Bets — {me}</div>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 6, fontFamily: SANS, fontSize: 13 }}>
+              <span style={{ color: C.fescue }}>At risk <strong style={{ color: C.cream }}>${atRisk.toFixed(2)}</strong></span>
+              <span style={{ color: C.fescue }}>Could win <strong style={{ color: C.copperLt }}>${toWin.toFixed(2)}</strong></span>
+              <span style={{ color: C.fescue }}>Settled net <strong style={{ color: net > 0 ? C.birdie : net < 0 ? C.bogeyBad : C.cream }}>{net > 0 ? "+" : ""}${net.toFixed(2)}</strong></span>
+            </div>
+            {open.length > 0 && <><div style={S.myBetsHead}>OPEN</div>{open.map((b) => <Line key={b.id} b={b} />)}</>}
+            {won.length > 0 && <><div style={S.myBetsHead}>WON</div>{won.map((b) => <Line key={b.id} b={b} />)}</>}
+            {lost.length > 0 && <><div style={S.myBetsHead}>LOST</div>{lost.map((b) => <Line key={b.id} b={b} />)}</>}
+          </div>
+        );
+      })()}
+
       {openMarkets.map((m) => {
         const opts = refreshedOptions(m, state, tp);
         const betsOnMarket = state.bets.filter((b) => b.marketId === m.id);
         return (
           <div key={m.id} className="nz-glass" style={S.card}>
-            <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "next_round" ? "NEXT ROUND" : "PROP"}</span>
+            <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "next_round" ? "NEXT ROUND" : m.kind === "match" ? "RYDER MATCH" : m.kind === "overunder" ? "OVER/UNDER" : "PROP"}</span>
               {m.live && <span style={{ ...S.kindTag, color: C.birdie }}>● LIVE ODDS</span>}</div>
             <div style={S.cardTitle}>{m.title}</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {opts.map((o) => {
                 const active = sel && sel.marketId === m.id && sel.optionId === o.optionId;
+                const moneyOn = betsOnMarket.filter((b) => b.optionId === o.optionId && b.status === "pending").reduce((s, b) => s + b.stake, 0);
                 return (
                   <button key={o.optionId} className="nz-oddsbtn" onClick={() => setSel({ marketId: m.id, optionId: o.optionId, label: o.label, odds: o.odds, title: m.title })}
                     style={{ ...S.oddsChip, ...(active ? S.oddsSelected : {}) }}>
                     <span style={S.oddsLabel}>{o.label}</span>
                     <span style={S.oddsNum}>{o.odds > 0 ? `+${o.odds}` : o.odds}{o.manual ? " ✎" : ""}</span>
+                    {moneyOn > 0 && <span style={{ fontSize: 11, color: C.birdie, fontFamily: SANS, marginTop: 2 }}>${moneyOn} in</span>}
                   </button>
                 );
               })}
             </div>
+            {/* aggregated: where the money is */}
+            {(() => {
+              const agg = {};
+              betsOnMarket.filter((b) => b.status === "pending").forEach((b) => { agg[b.optionId] = (agg[b.optionId] || 0) + b.stake; });
+              const rows = Object.entries(agg).sort((a, b) => b[1] - a[1]);
+              if (!rows.length) return null;
+              return (
+                <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+                  <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>WHERE THE MONEY IS</div>
+                  {rows.map(([oid, amt]) => {
+                    const opt = opts.find((o) => o.optionId === oid);
+                    return <div key={oid} style={S.openBetRow}><span style={{ flex: 1 }}>{opt?.label || "—"}</span>
+                      <span style={{ fontFamily: SANS, fontWeight: 700, color: C.copperLt }}>${amt}</span></div>;
+                  })}
+                </div>
+              );
+            })()}
             {/* public open bets on this market */}
             {betsOnMarket.length > 0 && (
               <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
@@ -1426,6 +1511,34 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await save({ ...state, markets: [...state.markets, m] });
     flash("Next-round market opened.");
   };
+  // One-tap: a moneyline for every Ryder match (scramble + singles)
+  const openAllMatches = async () => {
+    const P2 = (id) => state.players.find((x) => x.id === id);
+    const label = (ids) => ids.map((id) => P2(id)?.name.split(" ")[0]).join(" & ");
+    const build = (m, rk, rn) => ({ id: uid(), title: `${rn}: ${label(m.xs)} vs ${label(m.ys)}`, kind: "match", matchRef: { id: m.id, roundKey: rk }, live: true, status: "open", options: autoOddsForMatch(state, m, rk) });
+    const ms = [...(state.ryder.r1 || []).map((m) => build(m, "r1", "Scramble")), ...(state.ryder.r2 || []).map((m) => build(m, "r2", "Singles"))];
+    if (!ms.length) return flash("Set Ryder matches first.");
+    await save({ ...state, markets: [...state.markets, ...ms] });
+    flash(`${ms.length} match markets opened.`);
+  };
+  const openOverUnder = async () => {
+    if (!state.ryder.teamA.length || !state.ryder.teamB.length) return flash("Set Ryder teams first.");
+    const m = { id: uid(), title: `${state.ryder.teamAName || "Team A"} total Ryder points — O/U 3.5`, kind: "overunder", live: true, status: "open", options: autoOddsOverUnder(state, tp) };
+    await save({ ...state, markets: [...state.markets, m] });
+    flash("Over/Under market opened.");
+  };
+  const openCupWinner = async () => {
+    if (!state.ryder.teamA.length) return flash("Set Ryder teams first.");
+    const P2 = (id) => state.players.find((x) => x.id === id);
+    const sumH = (ids) => ids.reduce((s, id) => s + (P2(id)?.h || 0), 0);
+    const probs = softmax([-sumH(state.ryder.teamA), -sumH(state.ryder.teamB)], 12);
+    const m = { id: uid(), title: "Ryder Cup Winner", kind: "prop", live: false, status: "open", options: [
+      { optionId: uid(), label: state.ryder.teamAName || "Team A", odds: withVig(probToAmerican(probs[0])), manual: true },
+      { optionId: uid(), label: state.ryder.teamBName || "Team B", odds: withVig(probToAmerican(probs[1])), manual: true },
+    ] };
+    await save({ ...state, markets: [...state.markets, m] });
+    flash("Cup winner market opened.");
+  };
   const addProp = async () => {
     if (!propTitle.trim()) return flash("Title needed.");
     const opts = propOpts.filter((o) => o.label.trim()).map((o) => ({ optionId: uid(), label: o.label.trim(), odds: parseInt(o.odds) || 100, manual: true }));
@@ -1480,6 +1593,9 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
           <button className="nz-small" style={S.smallBtn} onClick={openOutright}>+ Tournament Winner</button>
           <button className="nz-small" style={S.smallBtn} onClick={openNextRound}>+ Wins Next Round</button>
+          <button className="nz-small" style={S.smallBtn} onClick={openAllMatches}>+ All Ryder Matches</button>
+          <button className="nz-small" style={S.smallBtn} onClick={openOverUnder}>+ Ryder Pts O/U 3.5</button>
+          <button className="nz-small" style={S.smallBtn} onClick={openCupWinner}>+ Ryder Cup Winner</button>
         </div>
       </div>
 
@@ -1713,6 +1829,7 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  myBetsHead: { fontSize: 11, letterSpacing: 1.5, color: '#8FA68E', fontFamily: SANS, marginTop: 10, marginBottom: 2 },
   parBadge: { display: 'inline-block', fontSize: 16, fontWeight: 800, fontFamily: SANS, color: '#1a0f08', background: 'linear-gradient(135deg, #F2C188, #C77F45)', padding: '3px 12px', borderRadius: 8, letterSpacing: 0.5 },
   scrambleHcpBox: { marginTop: 12, padding: '10px 12px', background: 'rgba(199,127,69,0.12)', border: '1px solid rgba(242,193,136,0.3)', borderRadius: 10 },
   matchCard: { background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px', marginTop: 10 },
