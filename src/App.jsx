@@ -180,7 +180,7 @@ export default function App() {
       )}
 
       <nav style={S.tabs} className="nz-tabs">
-        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["rounds", "Rounds"], ["bets", "The Book"], ["commish", "Commish"]].map(([k, lbl]) => (
+        {[["standings", "Standings"], ["scoring", "Live Scoring"], ["ryder", "Ryder Cup"], ["rounds", "Rounds"], ["bets", "The Book"], ["commish", "Commish"]].map(([k, lbl]) => (
           <button key={k} onClick={() => setTab(k)} className="nz-tab" style={{ ...S.tab, ...(tab === k ? S.tabActive : {}) }}>{lbl}</button>
         ))}
       </nav>
@@ -189,6 +189,7 @@ export default function App() {
         <div key={tab} className="nz-page">
           {tab === "standings" && <Standings state={state} tp={tp} />}
           {tab === "scoring" && <Scoring state={state} me={me} setName={setName} save={save} isCommish={isCommish} />}
+          {tab === "ryder" && <RyderView state={state} tp={tp} />}
           {tab === "rounds" && <RoundsView state={state} tp={tp} />}
           {tab === "bets" && <BookView state={state} tp={tp} me={me} setName={setName} save={save} flash={flash} />}
           {tab === "commish" && (isCommish
@@ -325,6 +326,89 @@ function ryderMatchResult(holes, m, state, roundKey) {
   const yNet = ryderSideNet(holes, m.ys, state, roundKey);
   const st = matchStatus(holes, xNet, yNet);
   return { id: m.id, ...st, xs: m.xs, ys: m.ys, roundKey };
+}
+
+// ============================================================
+// RYDER CUP VIEW — live team board, all matches
+// ============================================================
+function RyderView({ state, tp }) {
+  const P = (id) => state.players.find((x) => x.id === id);
+  const ry = state.ryder;
+  const d = tp.detail.ryder;
+
+  if (!ry.teamA.length || !ry.teamB.length) {
+    return <Empty msg="Ryder Cup teams aren't set yet. The commissioner assigns Team A and Team B in Commish → Ryder R1–2." />;
+  }
+
+  const MatchCard = ({ m, roundKey }) => {
+    const res = ryderMatchResult(state.holes, m, state, roundKey);
+    const xNames = m.xs.map((id) => P(id)?.name).filter(Boolean);
+    const yNames = m.ys.map((id) => P(id)?.name).filter(Boolean);
+    const xUp = res.up > 0, yUp = res.up < 0;
+    const statusText = res.final
+      ? (res.result === "H" ? "Halved" : `${res.result === "X" ? "Team A" : "Team B"} wins ${res.status}`)
+      : (res.up === 0 ? res.status : `${Math.abs(res.up)} UP`);
+    return (
+      <div style={S.matchCard}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, color: xUp ? C.birdie : C.cream }}>{xNames.join(" & ") || "—"}</div>
+            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>TEAM A</div>
+          </div>
+          <div style={{ textAlign: "center", minWidth: 92 }}>
+            <div style={{ fontFamily: SANS, fontWeight: 800, fontSize: 15, color: res.final ? (res.result === "H" ? C.fescue : C.copperLt) : C.copperLt }}>
+              {res.up === 0 && !res.final ? "AS" : statusText.replace("Team A wins ", "A ").replace("Team B wins ", "B ")}
+            </div>
+            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS }}>{res.final ? "FINAL" : res.thru ? `thru ${res.thru}` : "not started"}</div>
+          </div>
+          <div style={{ flex: 1, textAlign: "right" }}>
+            <div style={{ fontWeight: 700, color: yUp ? C.ocean : C.cream }}>{yNames.join(" & ") || "—"}</div>
+            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>TEAM B</div>
+          </div>
+        </div>
+        {/* progress bar: center = AS, slides toward leader */}
+        <div style={S.mpTrack}>
+          <div style={S.mpCenter} />
+          <div style={{ ...S.mpFill, ...(res.up >= 0 ? { left: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.birdie } : { right: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.ocean }) }} />
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      {/* overall cup score */}
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Ryder Cup</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", marginTop: 8 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>TEAM A</div>
+            <div style={{ fontSize: 44, fontWeight: 800, fontFamily: SANS, color: d && d.aPts >= d.bPts ? C.birdie : C.cream }}>{d ? fmtTP(d.aPts) : "0"}</div>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamA.map((id) => P(id)?.name.split(" ")[0]).join(", ")}</div>
+          </div>
+          <div style={{ color: C.fescue, fontFamily: SANS }}>vs</div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>TEAM B</div>
+            <div style={{ fontSize: 44, fontWeight: 800, fontFamily: SANS, color: d && d.bPts >= d.aPts ? C.ocean : C.cream }}>{d ? fmtTP(d.bPts) : "0"}</div>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamB.map((id) => P(id)?.name.split(" ")[0]).join(", ")}</div>
+          </div>
+        </div>
+        <p style={{ ...S.hint, textAlign: "center" }}>First to 3½ of 6 points wins the Cup. Each player on the winning team earns 2 TP. {d && d.winners ? `Team ${d.winners === ry.teamA ? "A" : "B"} has clinched.` : "3–3 goes to a captain playoff."}</p>
+      </div>
+
+      {/* round 1 matches */}
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Round 1 · Scramble</div>
+        {(ry.r1 || []).length ? (ry.r1 || []).map((m) => <MatchCard key={m.id} m={m} roundKey="r1" />) : <p style={S.hint}>No scramble matches set yet.</p>}
+      </div>
+
+      {/* round 2 matches */}
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Round 2 · Singles</div>
+        {(ry.r2 || []).length ? (ry.r2 || []).map((m) => <MatchCard key={m.id} m={m} roundKey="r2" />) : <p style={S.hint}>No singles matches set yet.</p>}
+      </div>
+    </div>
+  );
 }
 
 // ============================================================
@@ -716,7 +800,7 @@ function Commish({ state, save, flash, tp }) {
     <div style={{ display: "grid", gap: 16, paddingBottom: dirty ? 72 : 0 }}>
       <div className="nz-glass" style={S.card}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {[["setup", "Setup"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["tp", "TP Override"]].map(([k, l]) => (
+          {[["setup", "Setup"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["clear", "Clear Scores"], ["tp", "TP Override"]].map(([k, l]) => (
             <button key={k} onClick={() => setSection(k)} style={{ ...S.roundPill, ...(section === k ? S.roundPillOn : {}) }}>{l}</button>
           ))}
         </div>
@@ -728,6 +812,7 @@ function Commish({ state, save, flash, tp }) {
       {section === "r4" && <CommishR4 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
       {section === "r6" && <CommishR6 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
       {section === "book" && <CommishBook state={draft} save={draftSave} liveSettle={liveSettle} flash={flash} tp={tp} />}
+      {section === "clear" && <CommishClear state={draft} liveSave={liveSettle} flash={flash} />}
       {section === "tp" && <CommishTP state={draft} save={draftSave} flash={flash} tp={tp} />}
 
       {dirty && (
@@ -1148,6 +1233,11 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await liveSettle({ ...latest, bets: latest.bets.filter((b) => b.status !== "pending") });
     flash("Outstanding (unsettled) bets cleared.");
   };
+  const deleteBet = async (betId) => {
+    const latest = migrate((await loadState()) || state);
+    await liveSettle({ ...latest, bets: latest.bets.filter((b) => b.id !== betId) });
+    flash("Bet removed.");
+  };
 
   return (
     <>
@@ -1169,6 +1259,23 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
           <button style={{ ...S.miniGhost, padding: "11px 16px", color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }}
             onClick={() => { if (state.bets.length && window.confirm("Clear ALL bets, including settled ones? This wipes the entire bet history and money board. Cannot be undone.")) clearAllBets(); }}>Clear ALL bets</button>
         </div>
+        {state.bets.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>REMOVE A SINGLE BET</div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {[...state.bets].reverse().map((b) => (
+                <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: `1px solid ${C.line}` }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{b.who} · ${b.stake}</div>
+                    <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{b.label} @ {b.oddsAtBet > 0 ? `+${b.oddsAtBet}` : b.oddsAtBet} · {b.status}</div>
+                  </div>
+                  <button style={{ ...S.miniGhost, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }}
+                    onClick={() => { if (window.confirm(`Remove ${b.who}'s $${b.stake} bet on ${b.label}?`)) deleteBet(b.id); }}>Remove</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="nz-glass" style={S.card}>
@@ -1218,6 +1325,51 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
 
 
 const Empty = ({ msg }) => <div className="nz-glass" style={{ ...S.card, textAlign: "center", color: C.fescue, padding: 36, fontFamily: SANS }}>{msg}</div>;
+
+// ---- per-player, per-round score clear ----
+function CommishClear({ state, liveSave, flash }) {
+  const [pid, setPid] = React.useState("");
+  const player = state.players.find((p) => p.id === pid);
+  const clearOne = async (rKey, rName) => {
+    if (!player) return;
+    if (!window.confirm(`Clear ${player.name}'s ${rName} scores? This erases their card for that round and reopens it.`)) return;
+    const latest = migrate((await loadState()) || state);
+    const players = latest.players.map((p) => {
+      if (p.id !== pid) return p;
+      const scores = { ...p.scores }; delete scores[rKey];
+      return { ...p, scores, submitted: { ...(p.submitted || {}), [rKey]: false } };
+    });
+    await liveSave({ ...latest, players });
+    flash(`Cleared ${player.name}'s ${rName}.`);
+  };
+  return (
+    <div className="nz-glass" style={S.card}>
+      <div style={S.cardTitle}>Clear a Player's Round</div>
+      <p style={S.hint}>Pick a player, then clear any single round's scores. Acts live immediately.</p>
+      <select className="nz-input" style={{ ...S.input, marginTop: 10 }} value={pid} onChange={(e) => setPid(e.target.value)}>
+        <option value="">Select a player…</option>
+        {state.players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      {player && (
+        <div style={{ display: "grid", gap: 6, marginTop: 12 }}>
+          {ROUNDS.map((r) => {
+            const thru = state.holes.filter((H) => (player.scores[r.key] || {})[H.hole] != null).length;
+            const sub = !!(player.submitted && player.submitted[r.key]);
+            return (
+              <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: `1px solid ${C.line}` }}>
+                <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}
+                  <span style={{ color: C.fescue, fontSize: 12 }}>  {thru ? `${thru}/18${sub ? " ✓ submitted" : ""}` : "no scores"}</span>
+                </span>
+                <button disabled={!thru} style={{ ...S.miniGhost, color: thru ? C.bogeyBad : C.fescue, borderColor: thru ? "rgba(224,117,85,0.5)" : C.glassBorder, opacity: thru ? 1 : 0.5 }}
+                  onClick={() => clearOne(r.key, `Round ${r.n}`)}>Clear</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---- pin gate ----
 function PinGate({ pinEntry, setPinEntry, onTry }) {
@@ -1328,6 +1480,10 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  matchCard: { background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px', marginTop: 10 },
+  mpTrack: { position: 'relative', height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, marginTop: 10, overflow: 'hidden' },
+  mpCenter: { position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: 'rgba(255,255,255,0.25)' },
+  mpFill: { position: 'absolute', top: 0, bottom: 0, borderRadius: 3, transition: 'width .4s ease' },
   switcherRow: { display: 'flex', gap: 8, alignItems: 'center', padding: '10px 18px 2px', justifyContent: 'flex-end' },
   switcher: { background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.18)', borderRadius: 10, color: '#F7F1E6', padding: '6px 10px', fontSize: 13, fontFamily: SANS, outline: 'none' },
   submittedTag: { marginTop: 10, padding: '8px 12px', background: 'rgba(154,209,122,0.16)', border: '1px solid rgba(154,209,122,0.5)', borderRadius: 10, color: '#9AD17A', fontFamily: SANS, fontSize: 12, lineHeight: 1.5 },
