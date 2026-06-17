@@ -605,25 +605,124 @@ function Standings({ state, tp, onProfile }) {
   const P = (id) => state.players.find((x) => x.id === id);
   const ranked = [...state.players].map((p) => ({ p, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts);
   const leader = ranked[0]?.pts || 0;
+
+  const groupsSet = state.r6.champ.length > 0 && state.r6.losers.length > 0;
+  const r6net = (id) => { const pl = P(id); const t = playerNetTotal(state.holes, pl?.scores.r6, pl?.h); return { ...t, id }; };
+  const parThru6 = (id) => { const pl = P(id); return state.holes.reduce((s, H) => s + ((pl?.scores.r6 || {})[H.hole] != null ? H.par : 0), 0); };
+
+  // ---- PHASE 1: groups not set yet → projected cut by TP ----
+  if (!groupsSet) {
+    return (
+      <div style={{ display: "grid", gap: 16 }}>
+        <div className="nz-glass" style={S.card}>
+          <div style={S.cardTitle}>Tournament Points</div>
+          <p style={S.hint}>Cumulative across all six rounds. The top 4 make the Championship group for the final round; the bottom 4 fall to the Losers group. Cut line is projected and moves until Round 5 is final.</p>
+          <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+            {ranked.map(({ p, pts }, i) => (
+              <div key={p.id}>
+                {i === 4 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 2px 12px" }}>
+                    <div style={{ flex: 1, height: 1, background: "repeating-linear-gradient(90deg, rgba(242,166,90,0.6) 0 8px, transparent 8px 16px)" }} />
+                    <span style={{ fontSize: 10, letterSpacing: 1.5, color: C.copperLt, fontFamily: SANS, whiteSpace: "nowrap" }}>✂ PROJECTED CUT</span>
+                    <div style={{ flex: 1, height: 1, background: "repeating-linear-gradient(90deg, rgba(242,166,90,0.6) 0 8px, transparent 8px 16px)" }} />
+                  </div>
+                )}
+                <div className="nz-lbrow" style={{ ...S.standRow, cursor: "pointer", opacity: i >= 4 ? 0.82 : 1 }} onClick={() => onProfile && onProfile(p.id)}>
+                  <span style={{ width: 28, fontWeight: 800, color: i < 4 ? C.copperLt : C.fescue, fontFamily: SANS }}>{i + 1}</span>
+                  <Avatar player={p} size={34} />
+                  <div style={{ flex: 1, marginLeft: 10 }}>
+                    <div style={{ fontWeight: 600 }}><PlayerName player={p} /> <span style={{ color: C.fescue, fontWeight: 400, fontSize: 13 }}>· {p.h}</span></div>
+                    <div style={S.tpBarTrack}><div style={{ ...S.tpBarFill, width: `${leader ? (pts / leader) * 100 : 0}%` }} /></div>
+                  </div>
+                  <span style={{ fontFamily: SANS, fontWeight: 800, fontSize: 20, color: C.copperLt, width: 44, textAlign: "right" }}>{fmtTP(pts)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 16, marginTop: 12, fontFamily: SANS, fontSize: 12, color: C.fescue }}>
+            <span><b style={{ color: C.copperLt }}>Above the line</b> → Championship (plays for the title)</span>
+          </div>
+        </div>
+        <RyderBanner state={state} tp={tp} />
+      </div>
+    );
+  }
+
+  // ---- PHASE 2/3: groups set → Championship + Losers leaderboards by R6 net ----
+  const champRows = state.r6.champ.map(r6net).sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return a.net - b.net; });
+  const loserRows = state.r6.losers.map(r6net).sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return a.net - b.net; });
+  const champDone = state.r6.champ.length > 0 && state.r6.champ.every((id) => r6net(id).thru === 18);
+  const losersDone = state.r6.losers.length > 0 && state.r6.losers.every((id) => r6net(id).thru === 18);
+  // champion = lowest net in champ group (only when all done & no tie at the top)
+  const champTie = champDone && champRows.length > 1 && champRows[0].net === champRows[1].net;
+  const champion = champDone && !champTie ? champRows[0].id : null;
+  // the loser = highest net in losers group when all done
+  const loserTie = losersDone && loserRows.length > 1 && loserRows[loserRows.length - 1].net === loserRows[loserRows.length - 2].net;
+  const theLoser = losersDone && !loserTie ? loserRows[loserRows.length - 1].id : null;
+
+  const GroupLeader = ({ rows, title, sub, accent, isLosers }) => (
+    <div className="nz-glass" style={S.card}>
+      <div style={S.cardTitle}>{title}</div>
+      <p style={S.hint}>{sub}</p>
+      <div style={{ ...S.lbRow, ...S.lbHead, marginTop: 6 }}>
+        <span style={{ width: 22, flexShrink: 0 }}>#</span>
+        <span style={{ flex: 1, minWidth: 0 }}>Player</span>
+        <span style={{ width: 40, textAlign: "center", flexShrink: 0 }}>Thru</span>
+        <span style={{ width: 48, textAlign: "right", flexShrink: 0 }}>Net</span>
+      </div>
+      {rows.map((r, i) => {
+        const p = P(r.id);
+        const toPar = r.thru ? r.net - parThru6(r.id) : null;
+        const isChampWinner = r.id === champion;
+        const isBigLoser = r.id === theLoser;
+        const place = i + 1;
+        return (
+          <div key={r.id} className="nz-lbrow" style={{ ...S.lbRow, cursor: "pointer",
+            ...(isChampWinner ? { background: "linear-gradient(135deg, rgba(242,166,90,0.22), rgba(199,127,69,0.12))", borderRadius: 10, border: "1px solid rgba(242,166,90,0.5)" } : {}),
+            ...(isBigLoser ? { background: "rgba(120,90,70,0.18)", borderRadius: 10, border: "1px solid rgba(160,120,90,0.4)" } : {}) }}
+            onClick={() => onProfile && onProfile(r.id)}>
+            <span style={{ width: 22, flexShrink: 0, fontWeight: 800, color: accent, fontFamily: SANS }}>{isChampWinner ? "👑" : isBigLoser ? <span style={{ display: "inline-block", transform: "scaleY(-1)" }}>🦫</span> : (r.thru ? place : "–")}</span>
+            <Avatar player={p} size={30} />
+            <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
+              <div style={{ fontWeight: 600 }}><PlayerName player={p} /></div>
+            </div>
+            <span style={{ width: 40, textAlign: "center", flexShrink: 0, color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{r.thru === 18 ? "F" : r.thru || "—"}</span>
+            <span style={{ width: 48, textAlign: "right", flexShrink: 0, fontFamily: SANS, fontWeight: 800, color: toPar == null ? C.fescue : toPar < 0 ? C.birdie : toPar > 0 ? C.copperLt : C.cream }}>{r.thru ? relToPar(toPar) : "—"}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <div className="nz-glass" style={S.card}>
-        <div style={S.cardTitle}>Tournament Points</div>
-        <p style={S.hint}>Cumulative across all six rounds. Drives Round 4 pairings and the final-round groups. Tap a player to see their card.</p>
-        <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
-          {ranked.map(({ p, pts }, i) => (
-            <div key={p.id} className="nz-lbrow" style={{ ...S.standRow, cursor: "pointer" }} onClick={() => onProfile && onProfile(p.id)}>
-              <span style={{ width: 28, fontWeight: 800, color: i === 0 ? C.copperLt : C.fescue, fontFamily: SANS }}>{i + 1}</span>
-              <Avatar player={p} size={34} />
-              <div style={{ flex: 1, marginLeft: 10 }}>
-                <div style={{ fontWeight: 600 }}><PlayerName player={p} /> <span style={{ color: C.fescue, fontWeight: 400, fontSize: 13 }}>· {p.h}</span></div>
-                <div style={S.tpBarTrack}><div style={{ ...S.tpBarFill, width: `${leader ? (pts / leader) * 100 : 0}%` }} /></div>
-              </div>
-              <span style={{ fontFamily: SANS, fontWeight: 800, fontSize: 20, color: C.copperLt, width: 44, textAlign: "right" }}>{fmtTP(pts)}</span>
-            </div>
-          ))}
+      {champion && (
+        <div className="nz-glass" style={{ ...S.card, textAlign: "center", background: "linear-gradient(160deg, rgba(242,166,90,0.25), rgba(199,127,69,0.08))", border: "1px solid rgba(242,166,90,0.6)" }}>
+          <div style={{ fontSize: 44 }}>👑</div>
+          <div style={{ fontSize: 11, letterSpacing: 3, color: C.copperLt, fontFamily: SANS }}>CHAMPION OF THE CLAREY INVITATIONAL</div>
+          <div style={{ fontFamily: SERIF, fontSize: 30, color: C.cream, marginTop: 4 }}>{dispName(P(champion))}</div>
+          <div style={{ fontFamily: SANS, fontSize: 13, color: C.copperLt, marginTop: 2 }}>{relToPar(champRows[0].net - parThru6(champion))} · low net in the Championship group</div>
         </div>
-      </div>
+      )}
+      {champTie && <div className="nz-glass" style={{ ...S.card, textAlign: "center" }}><div style={S.cardTitle}>Championship tied at the top</div><p style={{ ...S.hint, textAlign: "center" }}>The low net is tied — settle the playoff to crown the champion.</p></div>}
+
+      <GroupLeader rows={champRows} accent={C.copperLt}
+        title={champion ? "🏆 Championship — Final" : "🏆 Championship Group"}
+        sub={champDone ? "Final round complete. Low net wins the tournament." : "Final round, net stroke play. Lowest net is crowned champion."} />
+
+      <GroupLeader rows={loserRows} accent={C.fescue} isLosers
+        title={theLoser ? "🦫 Losers — Final" : "Losers Group"}
+        sub={losersDone ? "All in. Highest net is the official loser." : "Playing for pride (and to avoid the armadillo). High net is the loser."} />
+
+      {theLoser && (
+        <div className="nz-glass" style={{ ...S.card, textAlign: "center", background: "rgba(120,90,70,0.16)", border: "1px solid rgba(160,120,90,0.45)" }}>
+          <div style={{ fontSize: 40, transform: "scaleY(-1)" }}>🦫</div>
+          <div style={{ fontSize: 11, letterSpacing: 3, color: "#b89a7a", fontFamily: SANS }}>THE LOSER</div>
+          <div style={{ fontFamily: SERIF, fontSize: 26, color: C.cream, marginTop: 4 }}>{dispName(P(theLoser))}</div>
+          <div style={{ fontFamily: SANS, fontSize: 13, color: "#b89a7a", marginTop: 2 }}>{relToPar(loserRows[loserRows.length - 1].net - parThru6(theLoser))} · high net in the Losers group</div>
+        </div>
+      )}
+
       <RyderBanner state={state} tp={tp} />
     </div>
   );
