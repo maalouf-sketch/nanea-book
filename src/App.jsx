@@ -760,12 +760,12 @@ function Scoring({ state, me, setName, save, isCommish }) {
         {(() => {
           const Header = () => (
             <div style={{ ...S.lbRow, ...S.lbHead }}>
-              <span style={{ width: 24 }}>#</span>
-              <span style={{ flex: 1 }}>Player</span>
-              <span style={{ width: 42, textAlign: "center" }}>Thru</span>
-              {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right" }}>Pts</span>}
-              <span style={{ width: 52, textAlign: "right" }}>Gross</span>
-              <span style={{ width: 52, textAlign: "right" }}>Net</span>
+              <span style={{ width: 20, flexShrink: 0 }}>#</span>
+              <span style={{ flex: 1, minWidth: 0 }}>Player</span>
+              <span style={{ width: 34, textAlign: "center", flexShrink: 0 }}>Thru</span>
+              {round.kind === "stableford" && <span style={{ width: 34, textAlign: "right", flexShrink: 0 }}>Pts</span>}
+              <span style={{ width: 44, textAlign: "right", flexShrink: 0 }}>Gross</span>
+              <span style={{ width: 40, textAlign: "right", flexShrink: 0 }}>Net</span>
             </div>
           );
           const Row = ({ r: rr, i }) => {
@@ -773,12 +773,12 @@ function Scoring({ state, me, setName, save, isCommish }) {
             return (
               <div key={p.id}>
                 <div className="nz-lbrow" style={{ ...S.lbRow, cursor: "pointer" }} onClick={() => setOpen(open === p.id ? null : p.id)}>
-                  <span style={{ width: 24, color: C.copperLt, fontWeight: 700, fontFamily: SANS }}>{thru ? i + 1 : "–"}</span>
-                  <span style={{ flex: 1, fontWeight: 600 }}>{dispName(p)}{p.name === me && <span style={S.youDot}>you</span>}{isSubmitted(p) && <span style={S.subDot}>✓</span>}{hasNick(p) && <span style={{ display: "block", fontSize: 11, color: C.fescue, fontWeight: 400, fontFamily: SANS }}>{p.name}</span>}</span>
-                  <span style={{ width: 42, textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{thru === 18 ? "F" : thru || "—"}</span>
-                  {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right", fontWeight: 700, fontFamily: SANS, color: C.cream }}>{thru ? stbl : "—"}</span>}
-                  <span style={{ width: 52, textAlign: "right", fontFamily: SANS, color: C.cream }}>{thru ? gross : "—"}</span>
-                  <span style={{ width: 52, textAlign: "right", fontWeight: 800, fontFamily: SANS, color: toPar == null ? C.fescue : toPar < 0 ? C.birdie : toPar > 0 ? C.copperLt : C.cream }}>{thru ? relToPar(toPar) : "—"}</span>
+                  <span style={{ width: 20, flexShrink: 0, color: C.copperLt, fontWeight: 700, fontFamily: SANS }}>{thru ? i + 1 : "–"}</span>
+                  <span style={{ flex: 1, minWidth: 0, fontWeight: 600 }}>{dispName(p)}{p.name === me && <span style={S.youDot}>you</span>}{isSubmitted(p) && <span style={S.subDot}>✓</span>}{hasNick(p) && <span style={{ display: "block", fontSize: 11, color: C.fescue, fontWeight: 400, fontFamily: SANS }}>{p.name}</span>}</span>
+                  <span style={{ width: 34, flexShrink: 0, textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{thru === 18 ? "F" : thru || "—"}</span>
+                  {round.kind === "stableford" && <span style={{ width: 34, flexShrink: 0, textAlign: "right", fontWeight: 700, fontFamily: SANS, color: C.cream }}>{thru ? stbl : "—"}</span>}
+                  <span style={{ width: 44, flexShrink: 0, textAlign: "right", fontFamily: SANS, color: C.cream }}>{thru ? gross : "—"}</span>
+                  <span style={{ width: 40, flexShrink: 0, textAlign: "right", fontWeight: 800, fontFamily: SANS, color: toPar == null ? C.fescue : toPar < 0 ? C.birdie : toPar > 0 ? C.copperLt : C.cream }}>{thru ? relToPar(toPar) : "—"}</span>
                 </div>
                 {open === p.id && <div className="nz-expand">
                   <Scorecard player={p} holes={holes} roundKey={roundKey} />
