@@ -638,8 +638,9 @@ function Standings({ state, tp, onProfile }) {
                 <div className="nz-lbrow" style={{ ...S.standRow, cursor: "pointer", opacity: i >= 4 ? 0.82 : 1 }} onClick={() => onProfile && onProfile(p.id)}>
                   <span style={{ width: 28, fontWeight: 800, color: i < 4 ? C.copperLt : C.fescue, fontFamily: SANS }}>{i + 1}</span>
                   <Avatar player={p} size={34} />
-                  <div style={{ flex: 1, marginLeft: 10 }}>
-                    <div style={{ fontWeight: 600 }}><PlayerName player={p} /> <span style={{ color: C.fescue, fontWeight: 400, fontSize: 13 }}>· {p.h}</span></div>
+                  <div style={{ flex: 1, marginLeft: 10, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600 }}>{dispName(p)} <span style={{ color: C.fescue, fontWeight: 400, fontSize: 13 }}>· {p.h}</span></div>
+                    {hasNick(p) && <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, fontWeight: 400, marginTop: -1 }}>{p.name}</div>}
                     <div style={S.tpBarTrack}><div style={{ ...S.tpBarFill, width: `${leader ? (pts / leader) * 100 : 0}%` }} /></div>
                   </div>
                   <span style={{ fontFamily: SANS, fontWeight: 800, fontSize: 20, color: C.copperLt, width: 44, textAlign: "right" }}>{fmtTP(pts)}</span>
@@ -2929,7 +2930,7 @@ const S = {
   cardOpen: { background: "rgba(0,0,0,0.25)", border: `1px solid ${C.line}`, borderRadius: 12, padding: "10px 8px", margin: "4px 0 8px" },
   cardTitle: { fontSize: 19, fontWeight: 700, marginBottom: 4 },
   hint: { color: C.fescue, fontSize: 12, marginTop: 6, fontFamily: SANS, lineHeight: 1.5 },
-  standRow: { display: "flex", alignItems: "center", gap: 10, padding: "8px 4px" },
+  standRow: { display: "flex", alignItems: "center", gap: 10, padding: "8px 4px", minHeight: 56 },
   tpBarTrack: { height: 6, background: "rgba(255,255,255,0.08)", borderRadius: 3, marginTop: 5, overflow: "hidden" },
   tpBarFill: { height: "100%", background: "linear-gradient(90deg, #C77F45, #F2C188)", borderRadius: 3, transition: "width .5s ease" },
   lbRow: { display: "flex", alignItems: "center", gap: 8, padding: "11px 6px", borderBottom: `1px solid ${C.line}` },
