@@ -261,7 +261,7 @@ export default function App() {
           {tab === "ryder" && <RyderView state={state} tp={tp} />}
           {tab === "rounds" && <RoundsView state={state} tp={tp} />}
           {tab === "rules" && <RulesView state={state} />}
-          {tab === "bets" && <BookView state={state} tp={tp} me={me} setName={setName} save={save} flash={flash} />}
+          {tab === "bets" && <BookView state={state} tp={tp} me={me} setName={setName} save={save} flash={flash} isCommish={isCommish} />}
           {tab === "commish" && (COMMISH_NAMES.includes(me)
             ? (isCommish
                 ? <Commish state={state} save={save} flash={flash} tp={tp} />
@@ -286,6 +286,9 @@ function migrate(s) {
   merged.rules = { ...RULES_DEFAULTS, ...(s.rules || {}), stbl: { ...RULES_DEFAULTS.stbl, ...(s.rules?.stbl || {}) } };
   merged.markets = s.markets || [];
   merged.bets = s.bets || [];
+  merged.bookPaused = !!s.bookPaused;
+  // Book display visibility (commish-controlled). Default ON so nothing disappears for existing setups.
+  merged.show = { money: true, settled: true, ...(s.show || {}) };
   return merged;
 }
 
@@ -1232,7 +1235,7 @@ function Commish({ state, save, flash, tp }) {
     <div style={{ display: "grid", gap: 16, paddingBottom: dirty ? 72 : 0 }}>
       <div className="nz-glass" style={S.card}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {[["setup", "Setup"], ["rules", "Scoring Rules"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["clear", "Clear Scores"], ["tp", "TP Override"]].map(([k, l]) => (
+          {[["setup", "Setup"], ["rules", "Scoring Rules"], ["ryder", "Ryder R1–2"], ["r4", "R4 Pairings"], ["r6", "R6 Groups"], ["book", "The Book"], ["display", "Book Display"], ["clear", "Clear Scores"], ["tp", "TP Override"]].map(([k, l]) => (
             <button key={k} onClick={() => setSection(k)} style={{ ...S.roundPill, ...(section === k ? S.roundPillOn : {}) }}>{l}</button>
           ))}
         </div>
@@ -1245,6 +1248,7 @@ function Commish({ state, save, flash, tp }) {
       {section === "r4" && <CommishR4 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
       {section === "r6" && <CommishR6 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
       {section === "book" && <CommishBook state={draft} save={draftSave} liveSettle={liveSettle} flash={flash} tp={tp} />}
+      {section === "display" && <CommishDisplay state={state} liveSave={liveSettle} flash={flash} />}
       {section === "clear" && <CommishClear state={draft} liveSave={liveSettle} flash={flash} />}
       {section === "tp" && <CommishTP state={draft} save={draftSave} flash={flash} tp={tp} />}
 
@@ -1587,7 +1591,16 @@ const americanToMult = (o) => (o > 0 ? 1 + o / 100 : 1 + 100 / Math.abs(o));
 const probToAmerican = (p) => { p = Math.max(0.04, Math.min(0.90, p)); return p >= 0.5 ? -Math.round((p / (1 - p)) * 100) : Math.round(((1 - p) / p) * 100); };
 const softmax = (s, t = 1) => { const m = Math.max(...s); const e = s.map((x) => Math.exp((x - m) / t)); const sum = e.reduce((a, b) => a + b, 0); return e.map((x) => x / sum); };
 const round5 = (n) => { const a = Math.abs(n); let r; if (a < 150) r = Math.round(a / 5) * 5; else if (a < 300) r = Math.round(a / 10) * 10; else r = Math.round(a / 25) * 25; return n < 0 ? -r : r; };
-const withVig = (am, vig = 0.05) => round5(am < 0 ? Math.round(am * (1 + vig)) : Math.round(am * (1 - vig)));
+// Apply the book's margin on the PROBABILITY side, then convert to American odds.
+// This correctly turns a true 50/50 into about -110 (not +100) and shades every
+// line toward the house. VIG_MARGIN ≈ 0.045 yields ~ -110 at even money.
+const VIG_MARGIN = 0.025;
+const withVig = (am, margin = VIG_MARGIN) => {
+  // am is the FAIR american odds; recover its implied prob, inflate it, re-convert.
+  const fairProb = am < 0 ? (-am) / (-am + 100) : 100 / (am + 100);
+  const juiced = Math.min(0.95, fairProb * (1 + margin) + margin / 2);
+  return round5(probToAmerican(juiced));
+};
 
 // Build auto-odds for "outright tournament winner" and "win next round" from current TP.
 // ---- live position helpers (blend in-progress standing into the odds) ----
@@ -1813,7 +1826,11 @@ function marketLocked(market, state, tp) {
   return { locked: false };
 }
 
-function BookView({ state, tp, me, setName, save, flash }) {
+function BookView({ state, tp, me, setName, save, flash, isCommish }) {
+  const show = state.show || { money: true, settled: true };
+  const canSeeMoney = show.money || isCommish;
+  const canSeeSettled = show.settled || isCommish;
+  const hiddenNote = (label) => isCommish ? <span style={{ fontSize: 11, color: C.copperLt, fontFamily: SANS, marginLeft: 6 }}>(hidden from players)</span> : null;
   const [sel, setSel] = useState(null); // {marketId, optionId, label, odds, title}
   const [stake, setStake] = useState("");
   const P = (id) => state.players.find((x) => x.id === id);
@@ -1822,13 +1839,32 @@ function BookView({ state, tp, me, setName, save, flash }) {
     if (state.bookPaused) { setSel(null); return flash("The book is paused right now."); }
     if (!me) return flash("Check in with your name first.");
     if (!sel) return flash("Tap a line to bet.");
-    const mkt = state.markets.find((x) => x.id === sel.marketId);
-    if (mkt && marketLocked(mkt, state, tp).locked) { setSel(null); return flash("That market just closed."); }
     const s = parseFloat(stake);
     if (!s || s <= 0) return flash("Enter a stake.");
+
+    // Pull the freshest state from the server and re-verify the line before locking.
+    const latest = migrate((await loadState()) || state);
+    const latestTp = computeTP(latest);
+    const mkt = latest.markets.find((x) => x.id === sel.marketId);
+    if (!mkt) { setSel(null); return flash("That market is no longer available."); }
+    if (marketLocked(mkt, latest, latestTp).locked) { setSel(null); return flash("That market just closed."); }
+    if (latest.bookPaused) { setSel(null); return flash("The book is paused right now."); }
+
+    // Recompute the CURRENT odds for the exact option they tapped.
+    const freshOpts = refreshedOptions(mkt, latest, latestTp);
+    const freshOpt = freshOpts.find((o) => (o.optionId || o.id) === sel.optionId);
+    if (!freshOpt) { setSel(null); return flash("That line is no longer offered."); }
+
+    // If the line moved at all since they opened the slip, block and re-confirm at the new number.
+    if (freshOpt.odds !== sel.odds) {
+      setSel({ ...sel, odds: freshOpt.odds, stale: true });
+      await save(latest); // refresh everyone-visible state to the latest lines
+      return; // bet slip will show "lines have changed" and the new odds; they tap again to accept
+    }
+
     const bet = { id: uid(), who: me, marketId: sel.marketId, optionId: sel.optionId, label: `${sel.title} — ${sel.label}`,
       stake: s, oddsAtBet: sel.odds, status: "pending", payout: +(s * americanToMult(sel.odds)).toFixed(2), ts: Date.now() };
-    await save({ ...state, bets: [...state.bets, bet] });
+    await save({ ...latest, bets: [...latest.bets, bet] });
     setSel(null); setStake("");
     flash(`Locked: $${s} to win $${(bet.payout - s).toFixed(2)}`);
   };
@@ -1911,14 +1947,14 @@ function BookView({ state, tp, me, setName, save, flash }) {
               })}
             </div>
             {/* aggregated: where the money is */}
-            {(() => {
+            {canSeeMoney && (() => {
               const agg = {};
               betsOnMarket.filter((b) => b.status === "pending").forEach((b) => { agg[b.optionId] = (agg[b.optionId] || 0) + b.stake; });
               const rows = Object.entries(agg).sort((a, b) => b[1] - a[1]);
               if (!rows.length) return null;
               return (
                 <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
-                  <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>WHERE THE MONEY IS</div>
+                  <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>WHERE THE MONEY IS{hiddenNote()}</div>
                   {rows.map(([oid, amt]) => {
                     const opt = opts.find((o) => o.optionId === oid);
                     return <div key={oid} style={S.openBetRow}><span style={{ flex: 1 }}>{opt?.label || "—"}</span>
@@ -1934,21 +1970,26 @@ function BookView({ state, tp, me, setName, save, flash }) {
       {sel && (
         <div className="nz-glass" style={S.betSlip}>
           <div style={S.slipKicker}>BET SLIP</div>
+          {sel.stale && (
+            <div style={{ background: "rgba(224,117,85,0.18)", border: "1px solid rgba(224,117,85,0.5)", borderRadius: 10, padding: "8px 12px", marginBottom: 8, fontFamily: SANS, fontSize: 13, color: C.copperLt }}>
+              ⚠️ Lines have changed since you opened this. The new price is shown below — tap again to accept it.
+            </div>
+          )}
           <div style={S.slipPick}>{sel.title}<br /><strong style={{ color: C.copperLt }}>{sel.label}</strong> @ {sel.odds > 0 ? `+${sel.odds}` : sel.odds}</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
             <span style={{ color: C.cream, opacity: 0.8 }}>$</span>
             <input className="nz-input" style={S.input} type="number" placeholder="stake" value={stake} onChange={(e) => setStake(e.target.value)} />
           </div>
           {stake > 0 && <div style={S.payout}>To win <strong>${(stake * americanToMult(sel.odds) - stake).toFixed(2)}</strong> · returns ${(stake * americanToMult(sel.odds)).toFixed(2)}</div>}
-          <button className="nz-primary" style={S.primaryBtn} onClick={place}>Lock it in</button>
+          <button className="nz-primary" style={S.primaryBtn} onClick={place}>{sel.stale ? "Accept new line & lock it in" : "Lock it in"}</button>
           <button onClick={() => setSel(null)} style={{ ...S.clearBtn, display: "block", margin: "10px auto 0" }}>cancel</button>
         </div>
       )}
 
       {/* money board */}
-      {ledgerRows.some(([, v]) => v !== 0) && (
+      {canSeeMoney && ledgerRows.some(([, v]) => v !== 0) && (
         <div className="nz-glass" style={S.card}>
-          <div style={S.cardTitle}>The Money</div>
+          <div style={S.cardTitle}>The Money{hiddenNote()}</div>
           <p style={S.hint}>Net position from settled bets. Square up at the clubhouse.</p>
           <div style={{ display: "grid", gap: 1, marginTop: 8 }}>
             {ledgerRows.map(([name, amt]) => (
@@ -1960,9 +2001,9 @@ function BookView({ state, tp, me, setName, save, flash }) {
       )}
 
       {/* settled history */}
-      {state.bets.some((b) => b.status !== "pending") && (
+      {canSeeSettled && state.bets.some((b) => b.status !== "pending") && (
         <div className="nz-glass" style={S.card}>
-          <div style={S.cardTitle}>Settled Bets</div>
+          <div style={S.cardTitle}>Settled Bets{hiddenNote()}</div>
           <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
             {[...state.bets].filter((b) => b.status !== "pending").reverse().map((b) => (
               <div key={b.id} style={S.betRow}>
@@ -1974,6 +2015,47 @@ function BookView({ state, tp, me, setName, save, flash }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ---- Book display visibility toggles (commit live) ----
+function CommishDisplay({ state, liveSave, flash }) {
+  const show = state.show || { money: true, settled: true };
+  const toggle = async (key) => {
+    const latest = migrate((await loadState()) || state);
+    const cur = latest.show || { money: true, settled: true };
+    const next = { ...cur, [key]: !cur[key] };
+    await liveSave({ ...latest, show: next });
+    flash(next[key] ? "Now visible to everyone." : "Hidden from players.");
+  };
+  const Toggle = ({ k, title, desc }) => {
+    const on = show[k] !== false;
+    return (
+      <div className="nz-glass" style={S.card}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={S.cardTitle}>{title}</div>
+            <p style={{ ...S.hint, marginTop: 4 }}>{desc}</p>
+          </div>
+          <button onClick={() => toggle(k)} style={{ ...S.smallBtn, flexShrink: 0, minWidth: 96, background: on ? "linear-gradient(135deg,#9AD17A,#6FA04E)" : "rgba(255,255,255,0.08)", color: on ? "#0b1a0b" : C.fescue, border: on ? "none" : `1px solid ${C.glassBorder}` }}>
+            {on ? "Visible" : "Hidden"}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: on ? C.birdie : C.copperLt, fontFamily: SANS, marginTop: 8 }}>
+          {on ? "Everyone can see this." : "Players can't see this — you still can, marked “hidden from players.”"}
+        </div>
+      </div>
+    );
+  };
+  return (
+    <>
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Book Display</div>
+        <p style={S.hint}>Control what the group sees on The Book tab. Toggling here takes effect live for everyone right away. You (the commissioner) always see everything regardless — hidden items are just marked for you.</p>
+      </div>
+      <Toggle k="money" title="“Where the Money Is” + The Money board" desc="The aggregated per-bet totals on each market and the net money ledger. Hide until you want the group seeing where the action is." />
+      <Toggle k="settled" title="Settled Bets" desc="The history of graded bets (won/lost). Hide if you don't want results showing yet." />
+    </>
   );
 }
 
