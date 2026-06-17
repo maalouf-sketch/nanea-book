@@ -606,7 +606,15 @@ function Standings({ state, tp, onProfile }) {
   const ranked = [...state.players].map((p) => ({ p, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts);
   const leader = ranked[0]?.pts || 0;
 
-  const groupsSet = state.r6.champ.length > 0 && state.r6.losers.length > 0;
+  // R5 is "final" when every player has submitted R5 or holed out all 18.
+  const r5Final = state.players.length > 0 && state.players.every((p) => {
+    const submitted = !!(p.submitted && p.submitted.r5);
+    const holed = playerNetTotal(state.holes, p.scores.r5, p.h).thru === 18;
+    return submitted || holed;
+  });
+  // Show the Championship/Losers leaderboards only once R5 is final AND the groups are built.
+  // Until then, keep the TP standings with a projected cut line so everyone can see where they stand.
+  const groupsSet = r5Final && state.r6.champ.length > 0 && state.r6.losers.length > 0;
   const r6net = (id) => { const pl = P(id); const t = playerNetTotal(state.holes, pl?.scores.r6, pl?.h); return { ...t, id }; };
   const parThru6 = (id) => { const pl = P(id); return state.holes.reduce((s, H) => s + ((pl?.scores.r6 || {})[H.hole] != null ? H.par : 0), 0); };
 
