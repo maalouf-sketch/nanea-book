@@ -102,7 +102,7 @@ const DEFAULT_STATE = {
   tournamentName: "Nanea Invitational",
   holes: DEFAULT_HOLES,
   players: DEFAULT_PLAYERS.map((p) => ({ ...p, scores: {} })), // scores keyed by round: {r1:{hole:strokes}}
-  ryder: { teamA: [], teamB: [], captainA: "", captainB: "",
+  ryder: { teamA: [], teamB: [], teamAName: "Team A", teamBName: "Team B", captainA: "", captainB: "",
     r1: [], r2: [], // matches: {id, side:'A', xs:[ids], ys:[ids], result:'X'|'Y'|'H'|''}
     playoff: "" }, // 'A' | 'B' | ''
   r4: { matches: [] }, // {id, xs:[id,id], ys:[id,id]}
@@ -329,6 +329,48 @@ function ryderMatchResult(holes, m, state, roundKey) {
   return { id: m.id, ...st, xs: m.xs, ys: m.ys, roundKey };
 }
 
+// Hole-by-hole scorecard for one Ryder match (scramble team scores or singles nets).
+function RyderMatchScorecard({ state, m, roundKey, nameA, nameB }) {
+  const P = (id) => state.players.find((x) => x.id === id);
+  const holes = state.holes;
+  const xNet = ryderSideNet(holes, m.xs, state, roundKey, m.xScores);
+  const yNet = ryderSideNet(holes, m.ys, state, roundKey, m.yScores);
+  // gross row for display: scramble shows team gross; singles shows best gross of side
+  const sideGross = (ids, teamScores) => {
+    const out = {};
+    if (roundKey === "r1") { holes.forEach((H) => { out[H.hole] = (teamScores || {})[H.hole] ?? null; }); }
+    else { holes.forEach((H) => { const gs = ids.map((id) => (P(id)?.scores?.[roundKey] || {})[H.hole]).filter((v) => v != null); out[H.hole] = gs.length ? Math.min(...gs) : null; }); }
+    return out;
+  };
+  const xG = sideGross(m.xs, m.xScores), yG = sideGross(m.ys, m.yScores);
+
+  const Row = ({ label, vals, net, color }) => (
+    <tr><td style={S.scLbl}>{label}</td>{holes.map((H) => {
+      const v = vals[H.hole];
+      return <td key={H.hole} style={{ ...S.scVal, color: v == null ? C.fescue : color }}>{v == null ? "·" : v}</td>;
+    })}</tr>
+  );
+  // who won each hole (by net) for a highlight row
+  const winRow = holes.map((H) => xNet[H.hole] == null || yNet[H.hole] == null ? "" : xNet[H.hole] < yNet[H.hole] ? "A" : yNet[H.hole] < xNet[H.hole] ? "B" : "½");
+
+  return (
+    <div style={S.cardOpen}>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ ...S.scTable, minWidth: 560 }}><tbody>
+          <tr><td style={S.scLbl}>Hole</td>{holes.map((H) => <td key={H.hole} style={S.scH}>{H.hole}</td>)}</tr>
+          <tr><td style={S.scLbl}>Par</td>{holes.map((H) => <td key={H.hole} style={S.scPar}>{H.par}</td>)}</tr>
+          <Row label={`${nameA} gross`} vals={xG} color={C.cream} />
+          <Row label={`${nameA} net`} vals={xNet} color={C.birdie} />
+          <Row label={`${nameB} gross`} vals={yG} color={C.cream} />
+          <Row label={`${nameB} net`} vals={yNet} color={C.ocean} />
+          <tr><td style={S.scLbl}>Hole won</td>{winRow.map((w, i) => <td key={i} style={{ ...S.scVal, fontWeight: 800, color: w === "A" ? C.birdie : w === "B" ? C.ocean : C.fescue }}>{w || "·"}</td>)}</tr>
+        </tbody></table>
+      </div>
+      <p style={{ ...S.hint, marginTop: 4 }}>{roundKey === "r1" ? "Scramble: one team score per hole, net off the blended team handicap." : "Singles: each player's net. 'Hole won' shows who took each hole."}</p>
+    </div>
+  );
+}
+
 // ============================================================
 // RYDER CUP VIEW — live team board, all matches
 // ============================================================
@@ -336,41 +378,43 @@ function RyderView({ state, tp }) {
   const P = (id) => state.players.find((x) => x.id === id);
   const ry = state.ryder;
   const d = tp.detail.ryder;
+  const [openId, setOpenId] = useState(null);
 
   if (!ry.teamA.length || !ry.teamB.length) {
-    return <Empty msg="Ryder Cup teams aren't set yet. The commissioner assigns Team A and Team B in Commish → Ryder R1–2." />;
+    return <Empty msg="Ryder Cup teams aren't set yet. The commissioner assigns the two teams in Commish → Ryder R1–2." />;
   }
+  const nameA = ry.teamAName || "Team A";
+  const nameB = ry.teamBName || "Team B";
 
-  const MatchCard = ({ m, roundKey }) => {
+  const MatchCard = ({ m, roundKey, onOpen }) => {
     const res = ryderMatchResult(state.holes, m, state, roundKey);
     const xNames = m.xs.map((id) => P(id)?.name).filter(Boolean);
     const yNames = m.ys.map((id) => P(id)?.name).filter(Boolean);
     const xUp = res.up > 0, yUp = res.up < 0;
     const statusText = res.final
-      ? (res.result === "H" ? "Halved" : `${res.result === "X" ? "Team A" : "Team B"} wins ${res.status}`)
+      ? (res.result === "H" ? "Halved" : `${res.result === "X" ? nameA : nameB} wins ${res.status}`)
       : (res.up === 0 ? res.status : `${Math.abs(res.up)} UP`);
     return (
       <div style={S.matchCard}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="nz-lbrow" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", borderRadius: 8 }} onClick={onOpen}>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 700, color: xUp ? C.birdie : C.cream }}>{xNames.join(" & ") || "—"}</div>
-            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>TEAM A</div>
+            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>{nameA.toUpperCase()}</div>
           </div>
           <div style={{ textAlign: "center", minWidth: 92 }}>
             <div style={{ fontFamily: SANS, fontWeight: 800, fontSize: 15, color: res.final ? (res.result === "H" ? C.fescue : C.copperLt) : C.copperLt }}>
-              {res.up === 0 && !res.final ? "AS" : statusText.replace("Team A wins ", "A ").replace("Team B wins ", "B ")}
+              {res.up === 0 && !res.final ? "AS" : (res.final ? res.status : `${Math.abs(res.up)} UP`)}
             </div>
-            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS }}>{res.final ? "FINAL" : res.thru ? `thru ${res.thru}` : "not started"}</div>
+            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS }}>{res.final ? "FINAL" : res.thru ? `thru ${res.thru}` : "tap to view"}</div>
           </div>
           <div style={{ flex: 1, textAlign: "right" }}>
             <div style={{ fontWeight: 700, color: yUp ? C.ocean : C.cream }}>{yNames.join(" & ") || "—"}</div>
-            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>TEAM B</div>
+            <div style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, letterSpacing: 1 }}>{nameB.toUpperCase()}</div>
           </div>
         </div>
-        {/* progress bar: center = AS, slides toward leader */}
         <div style={S.mpTrack}>
           <div style={S.mpCenter} />
-          <div style={{ ...S.mpFill, ...(res.up >= 0 ? { left: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.birdie } : { right: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.ocean }) }} />
+          <div style={{ ...S.mpFill, ...(res.up > 0 ? { right: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.birdie } : res.up < 0 ? { left: "50%", width: `${Math.min(Math.abs(res.up), 9) / 9 * 50}%`, background: C.ocean } : { left: "50%", width: 0 }) }} />
         </div>
         {roundKey === "r1" && m.xs.length === 2 && m.ys.length === 2 && (
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: SANS, fontSize: 11, color: C.fescue }}>
@@ -378,6 +422,7 @@ function RyderView({ state, tp }) {
             <span>scr. hcp {scrambleTeamHcp(P(m.ys[0]).h, P(m.ys[1]).h)}</span>
           </div>
         )}
+        {openId === m.id && <div className="nz-expand"><RyderMatchScorecard state={state} m={m} roundKey={roundKey} nameA={nameA} nameB={nameB} /></div>}
       </div>
     );
   };
@@ -389,30 +434,28 @@ function RyderView({ state, tp }) {
         <div style={S.cardTitle}>Ryder Cup</div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", marginTop: 8 }}>
           <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>TEAM A</div>
+            <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>{nameA.toUpperCase()}</div>
             <div style={{ fontSize: 44, fontWeight: 800, fontFamily: SANS, color: d && d.aPts >= d.bPts ? C.birdie : C.cream }}>{d ? fmtTP(d.aPts) : "0"}</div>
             <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamA.map((id) => P(id)?.name.split(" ")[0]).join(", ")}</div>
           </div>
           <div style={{ color: C.fescue, fontFamily: SANS }}>vs</div>
           <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>TEAM B</div>
+            <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>{nameB.toUpperCase()}</div>
             <div style={{ fontSize: 44, fontWeight: 800, fontFamily: SANS, color: d && d.bPts >= d.aPts ? C.ocean : C.cream }}>{d ? fmtTP(d.bPts) : "0"}</div>
             <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamB.map((id) => P(id)?.name.split(" ")[0]).join(", ")}</div>
           </div>
         </div>
-        <p style={{ ...S.hint, textAlign: "center" }}>First to 3½ of 6 points wins the Cup. Each player on the winning team earns 2 TP. {d && d.winners ? `Team ${d.winners === ry.teamA ? "A" : "B"} has clinched.` : "3–3 goes to a captain playoff."}</p>
+        <p style={{ ...S.hint, textAlign: "center" }}>First to 3½ of 6 points wins the Cup. Each player on the winning team earns 2 TP. {d && d.winners ? `${d.winners === ry.teamA ? nameA : nameB} has clinched.` : "3–3 goes to a captain playoff."}</p>
       </div>
 
-      {/* round 1 matches */}
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Round 1 · Scramble</div>
-        {(ry.r1 || []).length ? (ry.r1 || []).map((m) => <MatchCard key={m.id} m={m} roundKey="r1" />) : <p style={S.hint}>No scramble matches set yet.</p>}
+        {(ry.r1 || []).length ? (ry.r1 || []).map((m) => <MatchCard key={m.id} m={m} roundKey="r1" onOpen={() => setOpenId(openId === m.id ? null : m.id)} />) : <p style={S.hint}>No scramble matches set yet.</p>}
       </div>
 
-      {/* round 2 matches */}
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Round 2 · Singles</div>
-        {(ry.r2 || []).length ? (ry.r2 || []).map((m) => <MatchCard key={m.id} m={m} roundKey="r2" />) : <p style={S.hint}>No singles matches set yet.</p>}
+        {(ry.r2 || []).length ? (ry.r2 || []).map((m) => <MatchCard key={m.id} m={m} roundKey="r2" onOpen={() => setOpenId(openId === m.id ? null : m.id)} />) : <p style={S.hint}>No singles matches set yet.</p>}
       </div>
     </div>
   );
@@ -478,7 +521,8 @@ function RyderBanner({ state, tp }) {
 // LIVE SCORING — per round, each player enters own card
 // ============================================================
 function Scoring({ state, me, setName, save, isCommish }) {
-  const [roundKey, setRoundKey] = useState("r3");
+  const [roundKey, setRoundKey] = useState(() => { try { return localStorage.getItem("nanea_round") || "r3"; } catch { return "r3"; } });
+  const pickRound = (k) => { setRoundKey(k); try { localStorage.setItem("nanea_round", k); } catch {} };
   const [open, setOpen] = useState(null);
   const holes = state.holes;
   const round = ROUNDS.find((r) => r.key === roundKey);
@@ -527,6 +571,12 @@ function Scoring({ state, me, setName, save, isCommish }) {
     });
     await save({ ...state, ryder: { ...state.ryder, r1 } });
   };
+  const submitTeam = async (matchId, side) => {
+    const r1 = state.ryder.r1.map((m) => m.id !== matchId ? m
+      : { ...m, submitted: { ...(m.submitted || {}), [side]: true } });
+    await save({ ...state, ryder: { ...state.ryder, r1 } });
+  };
+  const teamSubmitted = myMatch && myMatch.submitted ? !!myMatch.submitted[mySide] : false;
 
   // par played so far (for net-to-par display)
   const parThru = (rs) => holes.reduce((s, H) => s + (rs[H.hole] != null ? H.par : 0), 0);
@@ -549,7 +599,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
         <div style={S.cardTitle}>Live Scoring</div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
           {ROUNDS.map((r) => (
-            <button key={r.key} onClick={() => setRoundKey(r.key)} style={{ ...S.roundPill, ...(roundKey === r.key ? S.roundPillOn : {}) }}>R{r.n}</button>
+            <button key={r.key} onClick={() => pickRound(r.key)} style={{ ...S.roundPill, ...(roundKey === r.key ? S.roundPillOn : {}) }}>R{r.n}</button>
           ))}
         </div>
         <div style={{ marginTop: 10, color: C.copperLt, fontFamily: SANS, fontSize: 13 }}>{round.fmt}</div>
@@ -563,7 +613,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
 
       {myPlayer && roundKey === "r1" && (
         myMatch
-          ? <ScrambleTeamCard state={state} holes={holes} match={myMatch} side={mySide} setTeamScore={setTeamScore} />
+          ? <ScrambleTeamCard state={state} holes={holes} match={myMatch} side={mySide} setTeamScore={setTeamScore} submitTeam={submitTeam} isSubmitted={teamSubmitted} />
           : <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Scramble — Round 1</div><p style={S.hint}>You're not in a scramble match yet. The commissioner sets the R1 pairings in Commish → Ryder R1–2.</p></div>
       )}
       {myPlayer && roundKey !== "r1" && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} />}
@@ -610,7 +660,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
   );
 }
 
-function ScrambleTeamCard({ state, holes, match, side, setTeamScore }) {
+function ScrambleTeamCard({ state, holes, match, side, setTeamScore, submitTeam, isSubmitted }) {
   const P = (id) => state.players.find((x) => x.id === id);
   const ids = side === "x" ? match.xs : match.ys;
   const oppIds = side === "x" ? match.ys : match.xs;
@@ -627,6 +677,10 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore }) {
   const teamStrokes = strokesOnHole(H.si, teamH);
   const res = ryderMatchResult(holes, match, state, "r1");
   const myUp = side === "x" ? res.up : -res.up;
+  const guardedTeamScore = (mid, sd, hole, val) => {
+    if (isSubmitted && !window.confirm("This team round is submitted. Edit anyway?")) return;
+    setTeamScore(mid, sd, hole, val);
+  };
 
   return (
     <div className="nz-mycard" style={S.myCard}>
@@ -648,7 +702,10 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore }) {
         <div style={{ textAlign: "center", flex: 1 }}>
           <div style={{ fontSize: 12, color: C.copperLt, fontFamily: SANS, letterSpacing: 2 }}>HOLE</div>
           <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1, fontFamily: SANS }}>{h}</div>
-          <div style={{ fontSize: 13, color: C.cream, opacity: 0.8, fontFamily: SANS }}>Par {H.par} · SI {H.si}{teamStrokes > 0 ? ` · team gets ${teamStrokes} stroke${teamStrokes > 1 ? "s" : ""}` : ""}</div>
+          <div style={{ marginTop: 4, display: "flex", gap: 8, justifyContent: "center", alignItems: "center" }}>
+            <span style={S.parBadge}>PAR {H.par}</span>
+            <span style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>SI {H.si}{teamStrokes > 0 ? ` · team ${teamStrokes} stroke${teamStrokes > 1 ? "s" : ""}` : ""}</span>
+          </div>
         </div>
         <button className="nz-holenav" style={S.holeNav} disabled={h >= 18} onClick={() => setH(Math.min(18, h + 1))}>›</button>
       </div>
@@ -656,11 +713,18 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore }) {
       <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 12, flexWrap: "wrap" }}>
         {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
           const diff = n - H.par; const active = cur === n;
-          return <button key={n} className="nz-score" onClick={() => { setTeamScore(match.id, side, h, n); if (h < 18) setTimeout(() => setH(h + 1), 200); }} style={{ ...S.scoreBtn, ...(active ? scoreColor(diff) : {}) }}>{n}</button>;
+          return <button key={n} className="nz-score" onClick={() => { guardedTeamScore(match.id, side, h, n); if (h < 18) setTimeout(() => setH(h + 1), 200); }} style={{ ...S.scoreBtn, ...(active ? scoreColor(diff) : {}) }}>{n}</button>;
         })}
       </div>
       {cur != null && <div style={{ textAlign: "center", marginTop: 12, fontFamily: SANS, fontSize: 13, color: C.cream, opacity: 0.9 }}>
-        Team gross {cur} · net {netHole(cur, H.si, teamH)} on {h}. <button style={S.clearBtn} onClick={() => setTeamScore(match.id, side, h, null)}>clear</button></div>}
+        Team gross {cur} · net {netHole(cur, H.si, teamH)} on {h}. <button style={S.clearBtn} onClick={() => guardedTeamScore(match.id, side, h, null)}>clear</button></div>}
+      {!isSubmitted && (
+        <button className="nz-primary" style={{ ...S.primaryBtn, opacity: thru === 18 ? 1 : 0.55 }}
+          onClick={() => { if (thru < 18 && !window.confirm(`Your team has only entered ${thru} of 18 holes. Submit anyway?`)) return; submitTeam(match.id, side); }}>
+          {thru === 18 ? "Submit Team Round" : `Submit Team Round (${thru}/18)`}
+        </button>
+      )}
+      {isSubmitted && <div style={S.submittedTag}>✓ TEAM SUBMITTED — locked. Tap a score to edit (you'll confirm). Commissioner can reopen.</div>}
       <p style={{ ...S.hint, textAlign: "center" }}>Either teammate can enter — you share one card. Both of you (and everyone) see it live.</p>
     </div>
   );
@@ -697,7 +761,10 @@ function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmi
         <div style={{ textAlign: "center", flex: 1 }}>
           <div style={{ fontSize: 12, color: C.copperLt, fontFamily: SANS, letterSpacing: 2 }}>HOLE</div>
           <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1, fontFamily: SANS, textShadow: "0 2px 20px rgba(255,200,120,0.3)" }}>{h}</div>
-          <div style={{ fontSize: 13, color: C.cream, opacity: 0.8, fontFamily: SANS }}>Par {H.par} · SI {H.si}{strokes > 0 ? ` · ${strokes} stroke${strokes > 1 ? "s" : ""}` : ""}</div>
+          <div style={{ marginTop: 4, display: "flex", gap: 8, justifyContent: "center", alignItems: "center" }}>
+            <span style={S.parBadge}>PAR {H.par}</span>
+            <span style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>SI {H.si}{strokes > 0 ? ` · ${strokes} stroke${strokes > 1 ? "s" : ""}` : ""}</span>
+          </div>
         </div>
         <button className="nz-holenav" style={S.holeNav} disabled={h >= 18} onClick={() => setH(Math.min(18, h + 1))}>›</button>
       </div>
@@ -999,8 +1066,23 @@ function CommishRyder({ state, save, flash }) {
   return (
     <>
       <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Team Names</div>
+        <p style={S.hint}>Name the two teams whatever you like — used everywhere on the Ryder Cup board.</p>
+        <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ ...S.teamBtn, ...S.teamBtnA, display: "grid", placeItems: "center" }}>A</span>
+            <input className="nz-input" style={S.input} defaultValue={ry.teamAName || "Team A"} onBlur={(e) => save({ ...state, ryder: { ...ry, teamAName: e.target.value.trim() || "Team A" } })} placeholder="Team A name" />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ ...S.teamBtn, ...S.teamBtnB, display: "grid", placeItems: "center" }}>B</span>
+            <input className="nz-input" style={S.input} defaultValue={ry.teamBName || "Team B"} onBlur={(e) => save({ ...state, ryder: { ...ry, teamBName: e.target.value.trim() || "Team B" } })} placeholder="Team B name" />
+          </div>
+        </div>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Assign Teams</div>
-        <p style={S.hint}>Tap to put a player on Team A or Team B (4 each).</p>
+        <p style={S.hint}>Tap to put a player on {ry.teamAName || "Team A"} or {ry.teamBName || "Team B"} (4 each).</p>
         <div style={{ display: "grid", gap: 1, marginTop: 8 }}>
           {state.players.map((p) => (
             <div key={p.id} style={S.lbRow}>
@@ -1010,7 +1092,7 @@ function CommishRyder({ state, save, flash }) {
             </div>
           ))}
         </div>
-        <div style={{ marginTop: 8, fontFamily: SANS, fontSize: 12, color: C.fescue }}>A: {ry.teamA.length}/4 · B: {ry.teamB.length}/4</div>
+        <div style={{ marginTop: 8, fontFamily: SANS, fontSize: 12, color: C.fescue }}>{ry.teamAName || "Team A"}: {ry.teamA.length}/4 · {ry.teamBName || "Team B"}: {ry.teamB.length}/4</div>
       </div>
 
       <div className="nz-glass" style={S.card}>
@@ -1562,6 +1644,7 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  parBadge: { display: 'inline-block', fontSize: 16, fontWeight: 800, fontFamily: SANS, color: '#1a0f08', background: 'linear-gradient(135deg, #F2C188, #C77F45)', padding: '3px 12px', borderRadius: 8, letterSpacing: 0.5 },
   scrambleHcpBox: { marginTop: 12, padding: '10px 12px', background: 'rgba(199,127,69,0.12)', border: '1px solid rgba(242,193,136,0.3)', borderRadius: 10 },
   matchCard: { background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px', marginTop: 10 },
   mpTrack: { position: 'relative', height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, marginTop: 10, overflow: 'hidden' },
