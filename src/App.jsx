@@ -1269,37 +1269,110 @@ const round5 = (n) => { const a = Math.abs(n); let r; if (a < 150) r = Math.roun
 const withVig = (am, vig = 0.05) => round5(am < 0 ? Math.round(am * (1 + vig)) : Math.round(am * (1 - vig)));
 
 // Build auto-odds for "outright tournament winner" and "win next round" from current TP.
-function autoOddsByTP(state, tp) {
+// ---- live position helpers (blend in-progress standing into the odds) ----
+// Net to-par for a player in a round (lower = better). Used to gauge who's pulling away.
+function playerLiveEdge(state, pid, roundKey) {
+  const p = state.players.find((x) => x.id === pid); if (!p) return 0;
+  const rs = p.scores[roundKey] || {};
+  let net = 0, par = 0;
+  state.holes.forEach((H) => { if (rs[H.hole] != null) { net += netHole(rs[H.hole], H.si, p.h); par += H.par; } });
+  return par ? par - net : 0; // positive = under par (playing well)
+}
+
+// Money-balancing: shade an option's probability toward where the stakes are.
+// More money on a side -> its implied prob rises (odds shorten), the other lengthens.
+// strength = base softmax probs (array), stakes = array of $ on each option.
+function shadeForMoney(probs, stakes, weight = 0.25) {
+  const total = stakes.reduce((a, b) => a + b, 0);
+  if (total <= 0) return probs;
+  const moneyShare = stakes.map((s) => s / total);
+  // blend: final = (1-w)*model + w*money. Keeps model primary, nudges toward the book.
+  const blended = probs.map((p, i) => (1 - weight) * p + weight * moneyShare[i]);
+  const sum = blended.reduce((a, b) => a + b, 0);
+  return blended.map((x) => x / sum);
+}
+
+// stakes per option for a market (pending only)
+function stakesByOption(state, marketId, optionIds) {
+  const map = {}; optionIds.forEach((id) => (map[id] = 0));
+  state.bets.filter((b) => b.marketId === marketId && b.status === "pending").forEach((b) => { if (b.optionId in map) map[b.optionId] += b.stake; });
+  return optionIds.map((id) => map[id]);
+}
+
+function autoOddsByTP(state, tp, marketId, openOdds) {
   const ps = state.players.map((p) => ({ id: p.id, name: p.name, tp: tp.tp[p.id] }));
-  const strengths = ps.map((p) => p.tp + 8);
-  const probs = softmax(strengths, 10);
+  const liveRound = currentLiveRound(state);
+  // live movement each player has earned: TP banked + gentle nudge from round in progress
+  const movement = ps.map((p) => p.tp + (liveRound ? 0.6 * playerLiveEdge(state, p.id, liveRound) : 0));
+  let probs;
+  if (openOdds && Object.keys(openOdds).length) {
+    // anchor: start from the commish's opening implied probabilities, then add live movement
+    const base = ps.map((p) => {
+      const o = openOdds[p.id];
+      const impliedProb = o != null ? (o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100)) : 0.12;
+      return Math.log(Math.max(impliedProb, 0.01)); // log-space so we can add movement linearly
+    });
+    const strengths = base.map((b, i) => b * 10 + movement[i]); // *10 to weight the anchor strongly
+    probs = softmax(strengths, 10);
+  } else {
+    const strengths = ps.map((p, i) => p.tp + 8 + (liveRound ? 0.6 * playerLiveEdge(state, p.id, liveRound) : 0));
+    probs = softmax(strengths, 10);
+  }
+  if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, ps.map((p) => p.id)));
   return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i])) }));
 }
 
-// Two-way odds for a single Ryder match, priced off the sides' (net) handicap strength.
-// For scramble we use the blended team handicaps; for singles the players' handicaps.
-function autoOddsForMatch(state, m, roundKey) {
+// the round most likely "in progress" — the lowest-numbered round with partial scores
+function currentLiveRound(state) {
+  for (const r of ["r3", "r5", "r6", "r1", "r2"]) {
+    const any = state.players.some((p) => Object.keys(p.scores[r] || {}).length > 0);
+    if (any && !state.players.every((p) => Object.keys(p.scores[r] || {}).length === 18)) return r;
+  }
+  return null;
+}
+
+// Two-way odds for a single Ryder match. Handicap sets the baseline (kept tight because
+// handicaps even the field); live match position shifts it — gently at 1 up, hard as a
+// side pulls away (4-5 up). Money on a side shades the line toward it.
+function autoOddsForMatch(state, m, roundKey, marketId) {
   const P = (id) => state.players.find((x) => x.id === id);
   const sideH = (ids) => ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 18);
-  // lower handicap = stronger. Convert to strength = -handicap.
   const xs = roundKey === "r1" ? sideH(m.xs) : P(m.xs[0]).h;
   const ys = roundKey === "r1" ? sideH(m.ys) : P(m.ys[0]).h;
-  const probs = softmax([-xs, -ys], 5); // temp 5 keeps a single match from being a blowout line
-  const label = (ids) => ids.map((id) => P(id)?.name.split(" ")[0]).join(" & ");
+  // baseline handicap strength (small spread; temp 5 keeps it modest)
+  const baseX = -xs, baseY = -ys;
+  // live position: holes up, but scaled by how many holes remain. A 2-up lead early is
+  // soft; the same lead with few holes left is decisive. This keeps swings gentle until
+  // someone is genuinely pulling away.
+  const res = ryderMatchResult(state.holes, m, state, roundKey);
+  const up = res.up; // + = X ahead
+  const remaining = Math.max(1, 18 - res.thru);
+  // dominance: lead relative to what's catchable. ~0.1 early, ->1 as lead approaches remaining.
+  const dominance = Math.sign(up) * Math.min(1, Math.pow(Math.abs(up) / Math.max(remaining, Math.abs(up)), 0.85)) * Math.abs(up);
+  const liveX = baseX + dominance * 1.6, liveY = baseY - dominance * 1.6;
+  let probs = res.final
+    ? (res.result === "X" ? [0.97, 0.03] : res.result === "Y" ? [0.03, 0.97] : [0.5, 0.5])
+    : softmax([liveX, liveY], 5);
+  const label = (ids) => ids.map((id) => P(id)?.name).join(" & "); // full names
+  const optIds = ["X_" + m.id, "Y_" + m.id];
+  if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, optIds));
   return [
-    { optionId: "X_" + m.id, label: label(m.xs), odds: withVig(probToAmerican(probs[0])), manual: false },
-    { optionId: "Y_" + m.id, label: label(m.ys), odds: withVig(probToAmerican(probs[1])), manual: false },
+    { optionId: optIds[0], label: label(m.xs), odds: withVig(probToAmerican(probs[0])), manual: false },
+    { optionId: optIds[1], label: label(m.ys), odds: withVig(probToAmerican(probs[1])), manual: false },
   ];
 }
 
-// Over/Under on Team A's total Ryder points (0–6). Line set at 3 (the midpoint).
-function autoOddsOverUnder(state, tp) {
-  // estimate Team A strength vs B from combined handicaps; closer teams -> ~even O/U
+// Over/Under on Team A's total Ryder points. Handicap baseline + live Cup position.
+function autoOddsOverUnder(state, tp, marketId) {
   const P = (id) => state.players.find((x) => x.id === id);
   const sumH = (ids) => ids.reduce((s, id) => s + (P(id)?.h || 0), 0);
-  const aStr = -sumH(state.ryder.teamA), bStr = -sumH(state.ryder.teamB);
-  const probs = softmax([aStr, bStr], 14); // gentle
-  // P(over 3) ~ P(team A strong). Clamp to readable.
+  let aStr = -sumH(state.ryder.teamA), bStr = -sumH(state.ryder.teamB);
+  // live: current Cup points shift the O/U
+  const d = tp.detail.ryder;
+  if (d) { aStr += (d.aPts - 3) * 1.5; bStr += (d.bPts - 3) * 1.5; }
+  let probs = softmax([aStr, bStr], 14);
+  const optIds = ["over", "under"];
+  if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, optIds));
   return [
     { optionId: "over", label: "Over 3.5", odds: withVig(probToAmerican(probs[0])), manual: false },
     { optionId: "under", label: "Under 3.5", odds: withVig(probToAmerican(probs[1])), manual: false },
@@ -1309,18 +1382,36 @@ function autoOddsOverUnder(state, tp) {
 // Regenerate odds for a market if it's auto (not manually pinned).
 function refreshedOptions(market, state, tp) {
   if (market.kind === "outright" || market.kind === "next_round") {
-    const auto = autoOddsByTP(state, tp);
+    const auto = autoOddsByTP(state, tp, market.id, market.openOdds);
     return market.options.map((o) => o.manual ? o : (auto.find((x) => x.id === o.optionId) ? { ...o, odds: auto.find((x) => x.id === o.optionId).odds } : o));
   }
   if (market.kind === "match" && market.matchRef) {
     const m = [...(state.ryder.r1 || []), ...(state.ryder.r2 || [])].find((x) => x.id === market.matchRef.id);
-    if (m) { const auto = autoOddsForMatch(state, m, market.matchRef.roundKey); return market.options.map((o) => o.manual ? o : (auto.find((a) => a.optionId === o.optionId) ? { ...o, odds: auto.find((a) => a.optionId === o.optionId).odds } : o)); }
+    if (m) { const auto = autoOddsForMatch(state, m, market.matchRef.roundKey, market.id); return market.options.map((o) => o.manual ? o : (auto.find((a) => a.optionId === o.optionId) ? { ...o, odds: auto.find((a) => a.optionId === o.optionId).odds } : o)); }
   }
   if (market.kind === "overunder") {
-    const auto = autoOddsOverUnder(state, tp);
+    const auto = autoOddsOverUnder(state, tp, market.id);
     return market.options.map((o) => o.manual ? o : (auto.find((a) => a.optionId === o.optionId) ? { ...o, odds: auto.find((a) => a.optionId === o.optionId).odds } : o));
   }
   return market.options;
+}
+
+// Should this market be closed to NEW bets? Locks when the outcome is decided or so
+// lopsided it's effectively decided, or when the commish has manually locked it.
+function marketLocked(market, state) {
+  if (market.locked) return { locked: true, reason: "Closed by commissioner" };
+  if (market.status === "settled") return { locked: true, reason: "Settled" };
+  if (market.kind === "match" && market.matchRef) {
+    const m = [...(state.ryder.r1 || []), ...(state.ryder.r2 || [])].find((x) => x.id === market.matchRef.id);
+    if (m) {
+      const res = ryderMatchResult(state.holes, m, state, market.matchRef.roundKey);
+      if (res.final) return { locked: true, reason: `Final — ${res.status}` };
+      // lopsided & nearly decided: lead within 1 of clinching
+      const remaining = 18 - res.thru;
+      if (Math.abs(res.up) > 0 && Math.abs(res.up) >= remaining - 1 && res.thru >= 9) return { locked: true, reason: `${Math.abs(res.up)} up, ${remaining} to play` };
+    }
+  }
+  return { locked: false };
 }
 
 function BookView({ state, tp, me, setName, save, flash }) {
@@ -1331,6 +1422,8 @@ function BookView({ state, tp, me, setName, save, flash }) {
   const place = async () => {
     if (!me) return flash("Check in with your name first.");
     if (!sel) return flash("Tap a line to bet.");
+    const mkt = state.markets.find((x) => x.id === sel.marketId);
+    if (mkt && marketLocked(mkt, state).locked) { setSel(null); return flash("That market just closed."); }
     const s = parseFloat(stake);
     if (!s || s <= 0) return flash("Enter a stake.");
     const bet = { id: uid(), who: me, marketId: sel.marketId, optionId: sel.optionId, label: `${sel.title} — ${sel.label}`,
@@ -1392,18 +1485,20 @@ function BookView({ state, tp, me, setName, save, flash }) {
       {openMarkets.map((m) => {
         const opts = refreshedOptions(m, state, tp);
         const betsOnMarket = state.bets.filter((b) => b.marketId === m.id);
+        const lock = marketLocked(m, state);
         return (
           <div key={m.id} className="nz-glass" style={S.card}>
             <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "next_round" ? "NEXT ROUND" : m.kind === "match" ? "RYDER MATCH" : m.kind === "overunder" ? "OVER/UNDER" : "PROP"}</span>
-              {m.live && <span style={{ ...S.kindTag, color: C.birdie }}>● LIVE ODDS</span>}</div>
+              {lock.locked ? <span style={{ ...S.kindTag, color: C.bogeyBad }}>🔒 CLOSED</span> : m.live && <span style={{ ...S.kindTag, color: C.birdie }}>● LIVE ODDS</span>}</div>
             <div style={S.cardTitle}>{m.title}</div>
+            {lock.locked && <div style={{ fontSize: 12, color: C.bogeyBad, fontFamily: SANS, marginTop: 2 }}>Betting closed — {lock.reason}</div>}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {opts.map((o) => {
                 const active = sel && sel.marketId === m.id && sel.optionId === o.optionId;
                 const moneyOn = betsOnMarket.filter((b) => b.optionId === o.optionId && b.status === "pending").reduce((s, b) => s + b.stake, 0);
                 return (
-                  <button key={o.optionId} className="nz-oddsbtn" onClick={() => setSel({ marketId: m.id, optionId: o.optionId, label: o.label, odds: o.odds, title: m.title })}
-                    style={{ ...S.oddsChip, ...(active ? S.oddsSelected : {}) }}>
+                  <button key={o.optionId} className="nz-oddsbtn" disabled={lock.locked} onClick={() => !lock.locked && setSel({ marketId: m.id, optionId: o.optionId, label: o.label, odds: o.odds, title: m.title })}
+                    style={{ ...S.oddsChip, ...(active ? S.oddsSelected : {}), ...(lock.locked ? { opacity: 0.45, cursor: "not-allowed" } : {}) }}>
                     <span style={S.oddsLabel}>{o.label}</span>
                     <span style={S.oddsNum}>{o.odds > 0 ? `+${o.odds}` : o.odds}{o.manual ? " ✎" : ""}</span>
                     {moneyOn > 0 && <span style={{ fontSize: 11, color: C.birdie, fontFamily: SANS, marginTop: 2 }}>${moneyOn} in</span>}
@@ -1496,13 +1591,18 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
   const P = (id) => state.players.find((x) => x.id === id);
   const [propTitle, setPropTitle] = useState("");
   const [propOpts, setPropOpts] = useState([{ label: "", odds: "" }, { label: "", odds: "" }]);
+  // commish opening tournament-winner lines (American odds per player)
+  const [openLines, setOpenLines] = useState(() => { const o = {}; state.players.forEach((p) => (o[p.id] = "")); return o; });
 
   const openOutright = async () => {
-    const auto = autoOddsByTP(state, tp);
-    const m = { id: uid(), title: "Tournament Winner", kind: "outright", live: true, status: "open",
+    // use commish-entered opening lines as the anchor; blanks default to a mid line
+    const openOdds = {};
+    state.players.forEach((p) => { const v = parseInt(openLines[p.id]); openOdds[p.id] = Number.isFinite(v) ? v : 800; });
+    const auto = autoOddsByTP(state, tp, null, openOdds);
+    const m = { id: uid(), title: "Tournament Winner", kind: "outright", live: true, status: "open", openOdds,
       options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
     await save({ ...state, markets: [...state.markets, m] });
-    flash("Outright market opened — odds auto-update.");
+    flash("Tournament winner market opened — opening lines set, will drift with scores.");
   };
   const openNextRound = async () => {
     const auto = autoOddsByTP(state, tp);
@@ -1511,10 +1611,22 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await save({ ...state, markets: [...state.markets, m] });
     flash("Next-round market opened.");
   };
+  // Fun manual props the commish settles by hand.
+  const openFunProp = async (kind) => {
+    let title, options;
+    const playerOpts = (oddsVal) => state.players.map((p) => ({ optionId: uid(), label: p.name, odds: oddsVal, manual: true }));
+    if (kind === "balls") { title = "Most golf balls lost"; options = playerOpts(700); }
+    else if (kind === "drive") { title = "Longest drive of the trip"; options = playerOpts(700); }
+    else if (kind === "threeputt") { title = "Most 3-putts"; options = playerOpts(700); }
+    else if (kind === "round") { title = "First to buy a round at the clubhouse"; options = playerOpts(700); }
+    const m = { id: uid(), title, kind: "prop", live: false, status: "open", options };
+    await save({ ...state, markets: [...state.markets, m] });
+    flash(`"${title}" posted — settle it by hand.`);
+  };
   // One-tap: a moneyline for every Ryder match (scramble + singles)
   const openAllMatches = async () => {
     const P2 = (id) => state.players.find((x) => x.id === id);
-    const label = (ids) => ids.map((id) => P2(id)?.name.split(" ")[0]).join(" & ");
+    const label = (ids) => ids.map((id) => P2(id)?.name).join(" & ");
     const build = (m, rk, rn) => ({ id: uid(), title: `${rn}: ${label(m.xs)} vs ${label(m.ys)}`, kind: "match", matchRef: { id: m.id, roundKey: rk }, live: true, status: "open", options: autoOddsForMatch(state, m, rk) });
     const ms = [...(state.ryder.r1 || []).map((m) => build(m, "r1", "Scramble")), ...(state.ryder.r2 || []).map((m) => build(m, "r2", "Singles"))];
     if (!ms.length) return flash("Set Ryder matches first.");
@@ -1584,18 +1696,42 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await liveSettle({ ...latest, bets: latest.bets.filter((b) => b.id !== betId) });
     flash("Bet removed.");
   };
+  const toggleLock = async (marketId) => {
+    const markets = state.markets.map((m) => m.id === marketId ? { ...m, locked: !m.locked } : m);
+    await save({ ...state, markets });
+  };
 
   return (
     <>
       <div className="nz-glass" style={S.card}>
-        <div style={S.cardTitle}>Open a Market</div>
-        <p style={S.hint}>Auto markets price themselves off the live standings and re-quote as points change. You can pin any single line to a fixed number.</p>
+        <div style={S.cardTitle}>Tournament Winner — Set Opening Lines</div>
+        <p style={S.hint}>Set each player's opening odds (American, e.g. +650 or -120). These anchor the market and drift automatically as scores and points come in. Blank = +800 default.</p>
+        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+          {state.players.map((p) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>{p.name} <span style={{ color: C.fescue }}>· hcp {p.h}</span></span>
+              <input className="nz-input" style={{ ...S.input, width: 100 }} type="number" placeholder="+800" value={openLines[p.id]} onChange={(e) => setOpenLines({ ...openLines, [p.id]: e.target.value })} />
+            </div>
+          ))}
+        </div>
+        <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10 }} onClick={openOutright}>+ Open Tournament Winner Market</button>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Quick Markets</div>
+        <p style={S.hint}>One tap — auto-priced off handicaps and live position, and they auto-close once decided.</p>
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-          <button className="nz-small" style={S.smallBtn} onClick={openOutright}>+ Tournament Winner</button>
           <button className="nz-small" style={S.smallBtn} onClick={openNextRound}>+ Wins Next Round</button>
           <button className="nz-small" style={S.smallBtn} onClick={openAllMatches}>+ All Ryder Matches</button>
           <button className="nz-small" style={S.smallBtn} onClick={openOverUnder}>+ Ryder Pts O/U 3.5</button>
           <button className="nz-small" style={S.smallBtn} onClick={openCupWinner}>+ Ryder Cup Winner</button>
+        </div>
+        <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, margin: "14px 0 6px" }}>FUN PROPS (settle by hand)</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="nz-small" style={S.smallBtn} onClick={() => openFunProp("balls")}>+ Most Balls Lost</button>
+          <button className="nz-small" style={S.smallBtn} onClick={() => openFunProp("drive")}>+ Longest Drive</button>
+          <button className="nz-small" style={S.smallBtn} onClick={() => openFunProp("threeputt")}>+ Most 3-Putts</button>
+          <button className="nz-small" style={S.smallBtn} onClick={() => openFunProp("round")}>+ First to Buy a Round</button>
         </div>
       </div>
 
@@ -1649,9 +1785,12 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
           <div key={m.id} className="nz-glass" style={S.card}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={S.cardTitle}>{m.title}</div>
-              <button style={S.xBtn} onClick={() => rmMarket(m.id)}>✕</button>
+              <div style={{ display: "flex", gap: 6 }}>
+                {m.status !== "settled" && <button style={S.miniGhost} onClick={() => toggleLock(m.id)}>{m.locked ? "🔓 unlock" : "🔒 lock"}</button>}
+                <button style={S.xBtn} onClick={() => rmMarket(m.id)}>✕</button>
+              </div>
             </div>
-            <div style={S.kindTag}>{m.status === "settled" ? "SETTLED" : m.kind.toUpperCase()}</div>
+            <div style={S.kindTag}>{m.status === "settled" ? "SETTLED" : marketLocked(m, state).locked ? "CLOSED · " + marketLocked(m, state).reason : m.kind.toUpperCase()}</div>
             <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
               {opts.map((o) => (
                 <div key={o.optionId} style={{ display: "flex", gap: 6, alignItems: "center" }}>
