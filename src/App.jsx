@@ -711,41 +711,70 @@ function Scoring({ state, me, setName, save, isCommish }) {
       ) : (
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Round {round.n} — {round.name}</div>
-        <div style={{ display: "grid", gap: 1, marginTop: 10 }}>
-          <div style={{ ...S.lbRow, ...S.lbHead }}>
-            <span style={{ width: 24 }}>#</span>
-            <span style={{ flex: 1 }}>Player</span>
-            <span style={{ width: 42, textAlign: "center" }}>Thru</span>
-            {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right" }}>Pts</span>}
-            <span style={{ width: 52, textAlign: "right" }}>Gross</span>
-            <span style={{ width: 52, textAlign: "right" }}>Net</span>
-          </div>
-          {rows.map(({ p, thru, gross, net, toPar, stbl }, i) => (
-            <div key={p.id}>
-              <div className="nz-lbrow" style={{ ...S.lbRow, cursor: "pointer" }} onClick={() => setOpen(open === p.id ? null : p.id)}>
-                <span style={{ width: 24, color: C.copperLt, fontWeight: 700, fontFamily: SANS }}>{thru ? i + 1 : "–"}</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>{dispName(p)}{p.name === me && <span style={S.youDot}>you</span>}{isSubmitted(p) && <span style={S.subDot}>✓</span>}{hasNick(p) && <span style={{ display: "block", fontSize: 11, color: C.fescue, fontWeight: 400, fontFamily: SANS }}>{p.name}</span>}</span>
-                <span style={{ width: 42, textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{thru === 18 ? "F" : thru || "—"}</span>
-                {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right", fontWeight: 700, fontFamily: SANS, color: C.cream }}>{thru ? stbl : "—"}</span>}
-                <span style={{ width: 52, textAlign: "right", fontFamily: SANS, color: C.cream }}>{thru ? gross : "—"}</span>
-                <span style={{ width: 52, textAlign: "right", fontWeight: 800, fontFamily: SANS, color: toPar == null ? C.fescue : toPar < 0 ? C.birdie : toPar > 0 ? C.copperLt : C.cream }}>{thru ? relToPar(toPar) : "—"}</span>
-              </div>
-              {open === p.id && <div className="nz-expand">
-                <Scorecard player={p} holes={holes} roundKey={roundKey} />
-                {isCommish && (
-                  <div style={{ display: "flex", gap: 6, padding: "4px 8px 10px" }}>
-                    {isSubmitted(p)
-                      ? <button style={S.miniGhost} onClick={() => reopenRound(p.id, roundKey)}>Reopen round</button>
-                      : <span style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>Not submitted</span>}
-                    <button style={{ ...S.miniGhost, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }}
-                      onClick={() => { if (window.confirm(`Clear ${p.name}'s Round ${round.n} scores? This erases their card for this round.`)) clearRound(p.id, roundKey); }}>Clear scores</button>
-                  </div>
-                )}
-              </div>}
+        {(() => {
+          const Header = () => (
+            <div style={{ ...S.lbRow, ...S.lbHead }}>
+              <span style={{ width: 24 }}>#</span>
+              <span style={{ flex: 1 }}>Player</span>
+              <span style={{ width: 42, textAlign: "center" }}>Thru</span>
+              {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right" }}>Pts</span>}
+              <span style={{ width: 52, textAlign: "right" }}>Gross</span>
+              <span style={{ width: 52, textAlign: "right" }}>Net</span>
             </div>
-          ))}
-        </div>
-        <p style={S.hint}>Tap a player to see their full scorecard. Net scoring applied automatically.{isCommish ? " As commissioner you can reopen or clear a submitted round here." : ""}</p>
+          );
+          const Row = ({ r: rr, i }) => {
+            const { p, thru, gross, net, toPar, stbl } = rr;
+            return (
+              <div key={p.id}>
+                <div className="nz-lbrow" style={{ ...S.lbRow, cursor: "pointer" }} onClick={() => setOpen(open === p.id ? null : p.id)}>
+                  <span style={{ width: 24, color: C.copperLt, fontWeight: 700, fontFamily: SANS }}>{thru ? i + 1 : "–"}</span>
+                  <span style={{ flex: 1, fontWeight: 600 }}>{dispName(p)}{p.name === me && <span style={S.youDot}>you</span>}{isSubmitted(p) && <span style={S.subDot}>✓</span>}{hasNick(p) && <span style={{ display: "block", fontSize: 11, color: C.fescue, fontWeight: 400, fontFamily: SANS }}>{p.name}</span>}</span>
+                  <span style={{ width: 42, textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{thru === 18 ? "F" : thru || "—"}</span>
+                  {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right", fontWeight: 700, fontFamily: SANS, color: C.cream }}>{thru ? stbl : "—"}</span>}
+                  <span style={{ width: 52, textAlign: "right", fontFamily: SANS, color: C.cream }}>{thru ? gross : "—"}</span>
+                  <span style={{ width: 52, textAlign: "right", fontWeight: 800, fontFamily: SANS, color: toPar == null ? C.fescue : toPar < 0 ? C.birdie : toPar > 0 ? C.copperLt : C.cream }}>{thru ? relToPar(toPar) : "—"}</span>
+                </div>
+                {open === p.id && <div className="nz-expand">
+                  <Scorecard player={p} holes={holes} roundKey={roundKey} />
+                  {isCommish && (
+                    <div style={{ display: "flex", gap: 6, padding: "4px 8px 10px" }}>
+                      {isSubmitted(p)
+                        ? <button style={S.miniGhost} onClick={() => reopenRound(p.id, roundKey)}>Reopen round</button>
+                        : <span style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>Not submitted</span>}
+                      <button style={{ ...S.miniGhost, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }}
+                        onClick={() => { if (window.confirm(`Clear ${p.name}'s Round ${round.n} scores? This erases their card for this round.`)) clearRound(p.id, roundKey); }}>Clear scores</button>
+                    </div>
+                  )}
+                </div>}
+              </div>
+            );
+          };
+
+          // R6: split into Championship (top 4) and Losers (bottom 4) groups
+          if (roundKey === "r6" && (state.r6.champ.length || state.r6.losers.length)) {
+            const inGroup = (ids) => rows.filter((rr) => ids.includes(rr.p.id))
+              .sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return a.net - b.net; });
+            const champRows = inGroup(state.r6.champ);
+            const loserRows = inGroup(state.r6.losers);
+            return (
+              <>
+                <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.copperLt, fontFamily: SANS, margin: "12px 0 4px" }}>🏆 CHAMPIONSHIP GROUP · low net wins the tournament</div>
+                <div style={{ display: "grid", gap: 1 }}><Header />{champRows.map((rr, i) => <Row key={rr.p.id} r={rr} i={i} />)}</div>
+                <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, margin: "18px 0 4px" }}>LOSERS GROUP · high net is the tournament loser</div>
+                <div style={{ display: "grid", gap: 1 }}><Header />{loserRows.map((rr, i) => <Row key={rr.p.id} r={rr} i={i} />)}</div>
+              </>
+            );
+          }
+
+          // all other rounds: single combined leaderboard
+          return (
+            <div style={{ display: "grid", gap: 1, marginTop: 10 }}>
+              <Header />
+              {rows.map((rr, i) => <Row key={rr.p.id} r={rr} i={i} />)}
+            </div>
+          );
+        })()}
+        <p style={S.hint}>Tap a player to see their full scorecard. Net scoring applied automatically.{isCommish ? " As commissioner you can reopen or clear a submitted round here." : ""}{roundKey === "r6" && !state.r6.champ.length ? " R6 groups are set by the commissioner after Round 5." : ""}</p>
       </div>
       )}
     </div>
