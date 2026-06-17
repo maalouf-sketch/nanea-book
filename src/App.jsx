@@ -39,6 +39,10 @@ const ROUNDS = [
 const uid = () => Math.random().toString(36).slice(2, 9);
 const relToPar = (n) => (n === 0 ? "E" : n > 0 ? `+${n}` : `${n}`);
 const fmtTP = (n) => (Number.isInteger(n) ? `${n}` : n.toFixed(1));
+// Display name = nickname if set, else real name. hasNick = whether to show the real-name subtext.
+const dispName = (p) => (p && p.displayName && p.displayName.trim()) ? p.displayName.trim() : (p ? p.name : "");
+const hasNick = (p) => !!(p && p.displayName && p.displayName.trim() && p.displayName.trim() !== p.name);
+const firstName = (p) => dispName(p).split(" ")[0];
 
 // ---- scoring helpers ----
 const strokesOnHole = (si, ph) => (ph >= si ? 1 : 0) + (ph >= si + 18 ? 1 : 0);
@@ -119,6 +123,7 @@ export default function App() {
   const [me, setMe] = useState("");
   const [isCommish, setIsCommish] = useState(false);
   const [pinEntry, setPinEntry] = useState("");
+  const [profileFor, setProfileFor] = useState(null);
   const [toast, setToast] = useState(null);
   const flash = (m) => { setToast(m); setTimeout(() => setToast(null), 2200); };
 
@@ -151,6 +156,25 @@ export default function App() {
   }, []);
 
   const setName = (n) => { setMe(n); try { localStorage.setItem("nanea_me", n); } catch {} };
+  const logout = () => { setMe(""); setIsCommish(false); try { localStorage.removeItem("nanea_me"); } catch {} };
+
+  // Claim a name (sets its PIN the first time) or log in with the existing PIN.
+  const loginPlayer = async (playerId, pinTry, isClaim) => {
+    const player = state.players.find((p) => p.id === playerId);
+    if (!player) return { ok: false, msg: "Player not found." };
+    if (!/^\d{4}$/.test(pinTry)) return { ok: false, msg: "PIN must be 4 digits." };
+    if (isClaim) {
+      // set the PIN now (claim-on-first-use)
+      const players = state.players.map((p) => p.id === playerId ? { ...p, pin: pinTry } : p);
+      await save({ ...state, players });
+      setName(player.name);
+      return { ok: true };
+    }
+    // commish PIN works for anyone
+    if (pinTry === COMMISH_PIN) { setName(player.name); return { ok: true }; }
+    if (player.pin && pinTry === player.pin) { setName(player.name); return { ok: true }; }
+    return { ok: false, msg: "Wrong PIN." };
+  };
 
   const tp = useMemo(() => computeTP(state), [state]);
 
@@ -163,21 +187,18 @@ export default function App() {
       <Hero name={state.tournamentName} sub={`Par ${state.holes.reduce((s, h) => s + h.par, 0)} · Mount Hualālai · 8-player net tournament`} badge={isCommish ? "COMMISSIONER" : me} />
 
       {!me ? (
-        <div style={S.namePrompt} className="nz-fade">
-          <span style={{ color: C.cream, fontSize: 14, fontFamily: SANS, opacity: 0.85 }}>Check in —</span>
-          <select className="nz-input" style={{ ...S.inputInline, minWidth: 160 }} defaultValue="" onChange={(e) => e.target.value && setName(e.target.value)}>
-            <option value="" disabled>pick your name</option>
-            {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
-          </select>
-        </div>
+        <PlayerLogin state={state} onLogin={loginPlayer} />
       ) : (
         <div style={S.switcherRow} className="nz-fade">
-          <span style={{ color: C.fescue, fontSize: 12, fontFamily: SANS }}>Playing as</span>
-          <select className="nz-input" style={S.switcher} value={me} onChange={(e) => setName(e.target.value)}>
-            {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
-          </select>
+          <span style={{ color: C.fescue, fontSize: 12, fontFamily: SANS }}>Logged in as <strong style={{ color: C.cream }}>{dispName(state.players.find((p) => p.name === me)) || me}</strong></span>
+          <button style={S.profileIconBtn} onClick={() => setProfileFor(state.players.find((p) => p.name === me)?.id)} title="Profile">
+            {(() => { const mp = state.players.find((p) => p.name === me); return <Avatar player={mp} size={30} />; })()}
+          </button>
+          <button style={{ ...S.miniGhost, padding: "5px 12px" }} onClick={logout}>Log out</button>
         </div>
       )}
+
+      {profileFor && <ProfileModal state={state} tp={tp} playerId={profileFor} isMe={state.players.find((p) => p.id === profileFor)?.name === me} isCommish={isCommish} onClose={() => setProfileFor(null)} save={save} flash={flash} setName={setName} />}
 
       <nav style={S.tabs} className="nz-tabs">
         {[["standings", "Standings"], ["scoring", "Live Scoring"], ["ryder", "Ryder Cup"], ["rounds", "Rounds"], ["bets", "The Book"], ["commish", "Commish"]].map(([k, lbl]) => (
@@ -185,9 +206,9 @@ export default function App() {
         ))}
       </nav>
 
-      <main style={S.main}>
-        <div key={tab} className="nz-page">
-          {tab === "standings" && <Standings state={state} tp={tp} />}
+      <main style={S.main} className="nz-main">
+        <div key={tab} className="nz-page nz-cols">
+          {tab === "standings" && <Standings state={state} tp={tp} onProfile={setProfileFor} />}
           {tab === "scoring" && <Scoring state={state} me={me} setName={setName} save={save} isCommish={isCommish} />}
           {tab === "ryder" && <RyderView state={state} tp={tp} />}
           {tab === "rounds" && <RoundsView state={state} tp={tp} />}
@@ -353,8 +374,8 @@ function RyderRoundBoard({ state, roundKey }) {
       <p style={S.hint}>Auto-scored from the entered scores. Tap a match to see the full card.</p>
       {ms.map((m) => {
         const res = ryderMatchResult(state.holes, m, state, roundKey);
-        const xNames = m.xs.map((id) => P(id)?.name).filter(Boolean);
-        const yNames = m.ys.map((id) => P(id)?.name).filter(Boolean);
+        const xNames = m.xs.map((id) => dispName(P(id))).filter(Boolean);
+        const yNames = m.ys.map((id) => dispName(P(id))).filter(Boolean);
         const xUp = res.up > 0, yUp = res.up < 0;
         return (
           <div key={m.id} style={S.matchCard}>
@@ -451,8 +472,8 @@ function RyderView({ state, tp }) {
 
   const MatchCard = ({ m, roundKey, onOpen }) => {
     const res = ryderMatchResult(state.holes, m, state, roundKey);
-    const xNames = m.xs.map((id) => P(id)?.name).filter(Boolean);
-    const yNames = m.ys.map((id) => P(id)?.name).filter(Boolean);
+    const xNames = m.xs.map((id) => dispName(P(id))).filter(Boolean);
+    const yNames = m.ys.map((id) => dispName(P(id))).filter(Boolean);
     const xUp = res.up > 0, yUp = res.up < 0;
     const statusText = res.final
       ? (res.result === "H" ? "Halved" : `${res.result === "X" ? nameA : nameB} wins ${res.status}`)
@@ -499,13 +520,13 @@ function RyderView({ state, tp }) {
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>{nameA.toUpperCase()}</div>
             <div style={{ fontSize: 44, fontWeight: 800, fontFamily: SANS, color: d && d.aPts >= d.bPts ? C.birdie : C.cream }}>{d ? fmtTP(d.aPts) : "0"}</div>
-            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamA.map((id) => P(id)?.name.split(" ")[0]).join(", ")}</div>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamA.map((id) => firstName(P(id))).join(", ")}</div>
           </div>
           <div style={{ color: C.fescue, fontFamily: SANS }}>vs</div>
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 11, letterSpacing: 2, color: C.fescue, fontFamily: SANS }}>{nameB.toUpperCase()}</div>
             <div style={{ fontSize: 44, fontWeight: 800, fontFamily: SANS, color: d && d.bPts >= d.aPts ? C.ocean : C.cream }}>{d ? fmtTP(d.bPts) : "0"}</div>
-            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamB.map((id) => P(id)?.name.split(" ")[0]).join(", ")}</div>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>{ry.teamB.map((id) => firstName(P(id))).join(", ")}</div>
           </div>
         </div>
         <p style={{ ...S.hint, textAlign: "center" }}>First to 3½ of 6 points wins the Cup. Each player on the winning team earns 2 TP. {d && d.winners ? `${d.winners === ry.teamA ? nameA : nameB} has clinched.` : "3–3 goes to a captain playoff."}</p>
@@ -527,7 +548,7 @@ function RyderView({ state, tp }) {
 // ============================================================
 // STANDINGS
 // ============================================================
-function Standings({ state, tp }) {
+function Standings({ state, tp, onProfile }) {
   const P = (id) => state.players.find((x) => x.id === id);
   const ranked = [...state.players].map((p) => ({ p, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts);
   const leader = ranked[0]?.pts || 0;
@@ -535,13 +556,14 @@ function Standings({ state, tp }) {
     <div style={{ display: "grid", gap: 16 }}>
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Tournament Points</div>
-        <p style={S.hint}>Cumulative across all six rounds. Drives Round 4 pairings and the final-round groups.</p>
+        <p style={S.hint}>Cumulative across all six rounds. Drives Round 4 pairings and the final-round groups. Tap a player to see their card.</p>
         <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
           {ranked.map(({ p, pts }, i) => (
-            <div key={p.id} style={S.standRow}>
+            <div key={p.id} className="nz-lbrow" style={{ ...S.standRow, cursor: "pointer" }} onClick={() => onProfile && onProfile(p.id)}>
               <span style={{ width: 28, fontWeight: 800, color: i === 0 ? C.copperLt : C.fescue, fontFamily: SANS }}>{i + 1}</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600 }}>{p.name} <span style={{ color: C.fescue, fontWeight: 400, fontSize: 13 }}>· {p.h}</span></div>
+              <Avatar player={p} size={34} />
+              <div style={{ flex: 1, marginLeft: 10 }}>
+                <div style={{ fontWeight: 600 }}><PlayerName player={p} /> <span style={{ color: C.fescue, fontWeight: 400, fontSize: 13 }}>· {p.h}</span></div>
                 <div style={S.tpBarTrack}><div style={{ ...S.tpBarFill, width: `${leader ? (pts / leader) * 100 : 0}%` }} /></div>
               </div>
               <span style={{ fontFamily: SANS, fontWeight: 800, fontSize: 20, color: C.copperLt, width: 44, textAlign: "right" }}>{fmtTP(pts)}</span>
@@ -670,11 +692,8 @@ function Scoring({ state, me, setName, save, isCommish }) {
         <div style={{ marginTop: 10, color: C.copperLt, fontFamily: SANS, fontSize: 13 }}>{round.fmt}</div>
       </div>
 
-      {!me && <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Check in to score</div>
-        <select className="nz-input" style={S.input} defaultValue="" onChange={(e) => e.target.value && setName(e.target.value)}>
-          <option value="" disabled>pick your name</option>
-          {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
-        </select></div>}
+      {!me && <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Log in to score</div>
+        <p style={S.hint}>Use the Check In box at the top to log in with your name and code, then you can enter your scores.</p></div>}
 
       {myPlayer && roundKey === "r1" && (
         myMatch
@@ -701,7 +720,7 @@ function Scoring({ state, me, setName, save, isCommish }) {
             <div key={p.id}>
               <div className="nz-lbrow" style={{ ...S.lbRow, cursor: "pointer" }} onClick={() => setOpen(open === p.id ? null : p.id)}>
                 <span style={{ width: 24, color: C.copperLt, fontWeight: 700, fontFamily: SANS }}>{thru ? i + 1 : "–"}</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>{p.name}{p.name === me && <span style={S.youDot}>you</span>}{isSubmitted(p) && <span style={S.subDot}>✓</span>}</span>
+                <span style={{ flex: 1, fontWeight: 600 }}>{dispName(p)}{p.name === me && <span style={S.youDot}>you</span>}{isSubmitted(p) && <span style={S.subDot}>✓</span>}{hasNick(p) && <span style={{ display: "block", fontSize: 11, color: C.fescue, fontWeight: 400, fontFamily: SANS }}>{p.name}</span>}</span>
                 <span style={{ width: 42, textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{thru === 18 ? "F" : thru || "—"}</span>
                 {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right", fontWeight: 700, fontFamily: SANS, color: C.cream }}>{thru ? stbl : "—"}</span>}
                 <span style={{ width: 52, textAlign: "right", fontFamily: SANS, color: C.cream }}>{thru ? gross : "—"}</span>
@@ -735,8 +754,8 @@ function ScrambleTeamCard({ state, holes, match, side, setTeamScore, submitTeam,
   const oppIds = side === "x" ? match.ys : match.xs;
   const scores = (side === "x" ? match.xScores : match.yScores) || {};
   const teamH = ids.length === 2 ? scrambleTeamHcp(P(ids[0]).h, P(ids[1]).h) : (ids[0] ? P(ids[0]).h : 0);
-  const teamNames = ids.map((id) => P(id)?.name).filter(Boolean).join(" & ");
-  const oppNames = oppIds.map((id) => P(id)?.name).filter(Boolean).join(" & ");
+  const teamNames = ids.map((id) => dispName(P(id))).filter(Boolean).join(" & ");
+  const oppNames = oppIds.map((id) => dispName(P(id))).filter(Boolean).join(" & ");
 
   const thru = holes.filter((H) => scores[H.hole] != null).length;
   const nextHole = thru >= 18 ? 18 : (() => { const miss = holes.find((H) => scores[H.hole] == null); return miss ? miss.hole : 18; })();
@@ -821,7 +840,7 @@ function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmi
   return (
     <div className="nz-mycard" style={{ ...S.myCard, ...(isSubmitted ? { borderColor: C.birdie } : {}) }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <div style={S.kicker}>Your Card · {player.name} · R{round.n}</div>
+        <div style={S.kicker}>Your Card · {dispName(player)} · R{round.n}</div>
         <div style={{ fontFamily: SANS, fontSize: 13, color: C.cream, opacity: 0.85 }}>{thru === 0 ? "Not started" : `Thru ${thru} · ${round.kind === "stableford" ? t + " pts" : t + " net"}`}</div>
       </div>
       {isSubmitted && <div style={S.submittedTag}>✓ SUBMITTED — locked. Tap a score to edit (you'll be asked to confirm). Commissioner can reopen.</div>}
@@ -914,13 +933,13 @@ function RoundDetail({ r, state, tp, ranked }) {
         return (
           <div key={m.id} style={{ ...S.matchRow, alignItems: "flex-start" }}>
             <span style={{ flex: 1 }}>
-              <span style={{ color: res.result === "X" ? C.birdie : C.cream }}>{m.xs.map((id) => P(id)?.name).join(" & ")}</span>
+              <span style={{ color: res.result === "X" ? C.birdie : C.cream }}>{m.xs.map((id) => dispName(P(id))).join(" & ")}</span>
               <span style={{ color: C.fescue }}> vs </span>
-              <span style={{ color: res.result === "Y" ? C.ocean : C.cream }}>{m.ys.map((id) => P(id)?.name).join(" & ")}</span>
+              <span style={{ color: res.result === "Y" ? C.ocean : C.cream }}>{m.ys.map((id) => dispName(P(id))).join(" & ")}</span>
             </span>
             <span style={{ fontFamily: SANS, color, fontSize: 13, fontWeight: 700, textAlign: "right", minWidth: 90 }}>
               {res.final
-                ? (res.result === "H" ? "Halved" : `${res.result === "X" ? m.xs.map((id) => P(id)?.name.split(" ")[0]).join("/") : m.ys.map((id) => P(id)?.name.split(" ")[0]).join("/")} win ${res.status}`)
+                ? (res.result === "H" ? "Halved" : `${res.result === "X" ? m.xs.map((id) => firstName(P(id))).join("/") : m.ys.map((id) => firstName(P(id))).join("/")} win ${res.status}`)
                 : res.status}
             </span>
           </div>
@@ -930,16 +949,16 @@ function RoundDetail({ r, state, tp, ranked }) {
   if (r.key === "r4") {
     if (!state.r4.matches.length) return <p style={S.hint}>Pairings set after R3 standings — 1st+8th vs 4th+5th, 2nd+7th vs 3rd+6th.</p>;
     return <div style={{ marginTop: 8 }}>{state.r4.matches.map((m) => { const res = bestBallResult(state.holes, m, state);
-      return <div key={m.id} style={S.matchRow}><span style={{ flex: 1 }}>{m.xs.map((id) => P(id)?.name).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => P(id)?.name).join(" & ")}</span>
+      return <div key={m.id} style={S.matchRow}><span style={{ flex: 1 }}>{m.xs.map((id) => dispName(P(id))).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => dispName(P(id))).join(" & ")}</span>
         <span style={{ fontFamily: SANS, color: C.copperLt }}>{res.complete ? (res.up > 0 ? `${res.up}↑ X` : res.up < 0 ? `${-res.up}↑ Y` : "AS") : (res.up === 0 ? "—" : `${res.up > 0 ? "+" : ""}${res.up}`)}</span></div>; })}</div>;
   }
   if (r.key === "r6") {
     if (!state.r6.champ.length) return <p style={S.hint}>Final groups set after R5 — top 4 in the Championship group, bottom 4 in the Losers group.</p>;
     return <div style={{ marginTop: 8 }}>
       <div style={{ color: C.copperLt, fontFamily: SANS, fontSize: 12, letterSpacing: 1 }}>CHAMPIONSHIP</div>
-      {state.r6.champ.map((id) => <div key={id} style={S.matchRow}><span>{P(id)?.name}</span><span style={{ fontFamily: SANS, color: C.fescue }}>{playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).thru === 18 ? playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).net + " net" : "—"}</span></div>)}
+      {state.r6.champ.map((id) => <div key={id} style={S.matchRow}><span>{dispName(P(id))}</span><span style={{ fontFamily: SANS, color: C.fescue }}>{playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).thru === 18 ? playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).net + " net" : "—"}</span></div>)}
       <div style={{ color: C.fescue, fontFamily: SANS, fontSize: 12, letterSpacing: 1, marginTop: 8 }}>LOSERS</div>
-      {state.r6.losers.map((id) => <div key={id} style={S.matchRow}><span>{P(id)?.name}</span><span style={{ fontFamily: SANS, color: C.fescue }}>{playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).thru === 18 ? playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).net + " net" : "—"}</span></div>)}
+      {state.r6.losers.map((id) => <div key={id} style={S.matchRow}><span>{dispName(P(id))}</span><span style={{ fontFamily: SANS, color: C.fescue }}>{playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).thru === 18 ? playerNetTotal(state.holes, P(id)?.scores.r6, P(id)?.h).net + " net" : "—"}</span></div>)}
     </div>;
   }
   // stableford / stroke ranking preview
@@ -949,7 +968,7 @@ function RoundDetail({ r, state, tp, ranked }) {
   const any = vals.some((v) => v.thru > 0);
   if (!any) return <p style={S.hint}>{isStbl ? "Net Stableford — best points total earns 7 TP down to 0 for last." : "Net stroke play — lowest net earns 7 TP down to 0 for last."}</p>;
   const sorted = [...vals].sort((a, b) => isStbl ? b.val - a.val : a.val - b.val);
-  return <div style={{ marginTop: 8 }}>{sorted.map((v, i) => <div key={v.id} style={S.matchRow}><span style={{ flex: 1 }}>{i + 1}. {P(v.id)?.name}</span><span style={{ fontFamily: SANS, color: C.copperLt }}>{v.thru ? (isStbl ? v.val + " pts" : v.val + " net") : "—"}</span></div>)}</div>;
+  return <div style={{ marginTop: 8 }}>{sorted.map((v, i) => <div key={v.id} style={S.matchRow}><span style={{ flex: 1 }}>{i + 1}. {dispName(P(v.id))}</span><span style={{ fontFamily: SANS, color: C.copperLt }}>{v.thru ? (isStbl ? v.val + " pts" : v.val + " net") : "—"}</span></div>)}</div>;
 }
 
 // ============================================================
@@ -1049,6 +1068,7 @@ function CommishSetup({ state, save, flash }) {
   const setSI = async (hole, si) => { const holes = state.holes.map((H) => H.hole === hole ? { ...H, si: Math.max(1, Math.min(18, parseInt(si) || H.si)) } : H); await save({ ...state, holes }); };
   const setPar = async (hole, par) => { const holes = state.holes.map((H) => H.hole === hole ? { ...H, par: Math.max(3, Math.min(6, parseInt(par) || H.par)) } : H); await save({ ...state, holes }); };
   const setHcp = async (id, h) => { const players = state.players.map((p) => p.id === id ? { ...p, h: parseFloat(h) || 0 } : p); await save({ ...state, players }); };
+  const resetPin = async (id, name) => { if (!window.confirm(`Reset ${name}'s login code? They'll set a new one next time they log in.`)) return; const players = state.players.map((p) => p.id === id ? { ...p, pin: "" } : p); await save({ ...state, players }); flash(`${name}'s code reset.`); };
   return (
     <>
       <div className="nz-glass" style={S.card}>
@@ -1056,6 +1076,18 @@ function CommishSetup({ state, save, flash }) {
         <div style={{ display: "flex", gap: 8 }}>
           <input className="nz-input" style={S.input} value={tName} onChange={(e) => setTName(e.target.value)} />
           <button className="nz-small" style={S.smallBtn} onClick={() => { save({ ...state, tournamentName: tName.trim() || state.tournamentName }); flash("Saved."); }}>Save</button>
+        </div>
+      </div>
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Player Login Codes</div>
+        <p style={S.hint}>Players set their own 4-digit code on first login. Reset one here if someone forgets it or you need to re-issue it.</p>
+        <div style={{ display: "grid", gap: 1, marginTop: 8 }}>
+          {state.players.map((p) => (
+            <div key={p.id} style={S.lbRow}>
+              <span style={{ flex: 1 }}>{p.name} <span style={{ color: p.pin ? C.birdie : C.fescue, fontSize: 12, fontFamily: SANS }}>{p.pin ? "· code set" : "· not claimed"}</span></span>
+              <button style={S.miniGhost} disabled={!p.pin} onClick={() => resetPin(p.id, p.name)}>Reset code</button>
+            </div>
+          ))}
         </div>
       </div>
       <div className="nz-glass" style={S.card}>
@@ -1095,6 +1127,14 @@ function CommishRyder({ state, save, flash }) {
   const addMatch = async (key) => {
     const m = { id: uid(), side: "A", xs: [], ys: [], result: "" };
     await save({ ...state, ryder: { ...ry, [key]: [...(ry[key] || []), m] } });
+  };
+  const clearTeams = async () => {
+    if (!window.confirm("Clear both team rosters? (Matches and names stay.)")) return;
+    await save({ ...state, ryder: { ...ry, teamA: [], teamB: [] } });
+  };
+  const clearMatches = async () => {
+    if (!window.confirm("Remove all R1 scramble and R2 singles matches? (Team rosters stay.)")) return;
+    await save({ ...state, ryder: { ...ry, r1: [], r2: [] } });
   };
   const updMatch = async (key, id, patch) => {
     const arr = ry[key].map((m) => m.id === id ? { ...m, ...patch } : m);
@@ -1162,6 +1202,10 @@ function CommishRyder({ state, save, flash }) {
           ))}
         </div>
         <div style={{ marginTop: 8, fontFamily: SANS, fontSize: 12, color: C.fescue }}>{ry.teamAName || "Team A"}: {ry.teamA.length}/4 · {ry.teamBName || "Team B"}: {ry.teamB.length}/4</div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button style={{ ...S.miniGhost, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }} onClick={clearTeams}>Clear rosters</button>
+          <button style={{ ...S.miniGhost, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }} onClick={clearMatches}>Clear all matches</button>
+        </div>
       </div>
 
       <div className="nz-glass" style={S.card}>
@@ -1207,7 +1251,7 @@ function CommishR4({ state, save, flash, ranked }) {
       <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10 }} onClick={autobuild}>Auto-build from standings</button>
       <div style={{ marginTop: 12 }}>
         {state.r4.matches.map((m, i) => (
-          <div key={m.id} style={S.matchRow}><span style={{ flex: 1 }}>Match {i + 1}: {m.xs.map((id) => P(id)?.name).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => P(id)?.name).join(" & ")}</span></div>
+          <div key={m.id} style={S.matchRow}><span style={{ flex: 1 }}>Match {i + 1}: {m.xs.map((id) => dispName(P(id))).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => dispName(P(id))).join(" & ")}</span></div>
         ))}
         {!state.r4.matches.length && <p style={S.hint}>No pairings yet.</p>}
       </div>
@@ -1229,9 +1273,9 @@ function CommishR6({ state, save, flash, ranked }) {
       <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10 }} onClick={build}>Build groups from standings</button>
       {state.r6.champ.length > 0 && <div style={{ marginTop: 12 }}>
         <div style={{ color: C.copperLt, fontFamily: SANS, fontSize: 12, letterSpacing: 1 }}>CHAMPIONSHIP</div>
-        {state.r6.champ.map((id) => <div key={id} style={S.matchRow}><span>{P(id)?.name}</span></div>)}
+        {state.r6.champ.map((id) => <div key={id} style={S.matchRow}><span>{dispName(P(id))}</span></div>)}
         <div style={{ color: C.fescue, fontFamily: SANS, fontSize: 12, letterSpacing: 1, marginTop: 8 }}>LOSERS</div>
-        {state.r6.losers.map((id) => <div key={id} style={S.matchRow}><span>{P(id)?.name}</span></div>)}
+        {state.r6.losers.map((id) => <div key={id} style={S.matchRow}><span>{dispName(P(id))}</span></div>)}
       </div>}
     </div>
   );
@@ -1300,7 +1344,7 @@ function stakesByOption(state, marketId, optionIds) {
 }
 
 function autoOddsByTP(state, tp, marketId, openOdds) {
-  const ps = state.players.map((p) => ({ id: p.id, name: p.name, tp: tp.tp[p.id] }));
+  const ps = state.players.map((p) => ({ id: p.id, name: dispName(p), tp: tp.tp[p.id] }));
   const liveRound = currentLiveRound(state);
   // live movement each player has earned: TP banked + gentle nudge from round in progress
   const movement = ps.map((p) => p.tp + (liveRound ? 0.6 * playerLiveEdge(state, p.id, liveRound) : 0));
@@ -1353,7 +1397,7 @@ function autoOddsForMatch(state, m, roundKey, marketId) {
   let probs = res.final
     ? (res.result === "X" ? [0.97, 0.03] : res.result === "Y" ? [0.03, 0.97] : [0.5, 0.5])
     : softmax([liveX, liveY], 5);
-  const label = (ids) => ids.map((id) => P(id)?.name).join(" & "); // full names
+  const label = (ids) => ids.map((id) => dispName(P(id))).join(" & ");
   const optIds = ["X_" + m.id, "Y_" + m.id];
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, optIds));
   return [
@@ -1442,11 +1486,8 @@ function BookView({ state, tp, me, setName, save, flash }) {
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      {!me && <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Check in to bet</div>
-        <select className="nz-input" style={S.input} defaultValue="" onChange={(e) => e.target.value && setName(e.target.value)}>
-          <option value="" disabled>pick your name</option>
-          {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
-        </select></div>}
+      {!me && <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Log in to bet</div>
+        <p style={S.hint}>Use the Check In box at the top to log in with your name and code, then you can place bets.</p></div>}
 
       {!openMarkets.length && <Empty msg="No betting lines open yet. The commissioner opens markets — odds move automatically as scores and points change." />}
 
@@ -1523,19 +1564,6 @@ function BookView({ state, tp, me, setName, save, flash }) {
                 </div>
               );
             })()}
-            {/* public open bets on this market */}
-            {betsOnMarket.length > 0 && (
-              <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
-                <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>WHO'S IN</div>
-                {betsOnMarket.map((b) => {
-                  const opt = m.options.find((o) => o.optionId === b.optionId);
-                  return <div key={b.id} style={S.openBetRow}>
-                    <span style={{ flex: 1 }}><b>{b.who}</b> · {opt?.label}</span>
-                    <span style={{ fontFamily: SANS, color: C.copperLt }}>${b.stake} @ {b.oddsAtBet > 0 ? `+${b.oddsAtBet}` : b.oddsAtBet}</span>
-                  </div>;
-                })}
-              </div>
-            )}
           </div>
         );
       })}
@@ -1614,7 +1642,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
   // Fun manual props the commish settles by hand.
   const openFunProp = async (kind) => {
     let title, options;
-    const playerOpts = (oddsVal) => state.players.map((p) => ({ optionId: uid(), label: p.name, odds: oddsVal, manual: true }));
+    const playerOpts = (oddsVal) => state.players.map((p) => ({ optionId: uid(), label: dispName(p), odds: oddsVal, manual: true }));
     if (kind === "balls") { title = "Most golf balls lost"; options = playerOpts(700); }
     else if (kind === "drive") { title = "Longest drive of the trip"; options = playerOpts(700); }
     else if (kind === "threeputt") { title = "Most 3-putts"; options = playerOpts(700); }
@@ -1830,7 +1858,23 @@ function CommishClear({ state, liveSave, flash }) {
     await liveSave({ ...latest, players });
     flash(`Cleared ${player.name}'s ${rName}.`);
   };
+  const wipeAll = async () => {
+    if (!window.confirm("Wipe ALL scores for EVERY player across ALL rounds? This also clears scramble team cards and reopens every round. Standings reset to zero. Cannot be undone.")) return;
+    if (!window.confirm("Are you absolutely sure? This erases the entire tournament's scores.")) return;
+    const latest = migrate((await loadState()) || state);
+    const players = latest.players.map((p) => ({ ...p, scores: {}, submitted: {} }));
+    // also clear scramble team scores stored on R1 matches
+    const r1 = (latest.ryder.r1 || []).map((m) => ({ ...m, xScores: {}, yScores: {}, submitted: {} }));
+    await liveSave({ ...latest, players, ryder: { ...latest.ryder, r1 } });
+    flash("All scores wiped. Every round reopened.");
+  };
   return (
+    <>
+    <div className="nz-glass" style={{ ...S.card, border: "1px solid rgba(224,117,85,0.4)" }}>
+      <div style={S.cardTitle}>Wipe All Scores</div>
+      <p style={S.hint}>Resets the entire tournament — every player, every round, including scramble team cards. Standings go back to zero. Use this to start fresh (e.g. after testing). Double-confirmed.</p>
+      <button style={{ ...S.miniGhost, padding: "11px 16px", marginTop: 8, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }} onClick={wipeAll}>Wipe ALL scores</button>
+    </div>
     <div className="nz-glass" style={S.card}>
       <div style={S.cardTitle}>Clear a Player's Round</div>
       <p style={S.hint}>Pick a player, then clear any single round's scores. Acts live immediately.</p>
@@ -1856,10 +1900,181 @@ function CommishClear({ state, liveSave, flash }) {
         </div>
       )}
     </div>
+    </>
   );
 }
 
 // ---- pin gate ----
+// ---- name display: nickname big, real name in small subtext if a nickname is set ----
+function PlayerName({ player, sub = true, style }) {
+  if (!player) return null;
+  return (
+    <span style={style}>
+      {dispName(player)}
+      {sub && hasNick(player) && <span style={{ display: "block", fontSize: 11, color: C.fescue, fontWeight: 400, fontFamily: SANS }}>{player.name}</span>}
+    </span>
+  );
+}
+
+// ---- avatar: emoji if set, else colored initials monogram ----
+function Avatar({ player, size = 40 }) {  if (!player) return null;
+  const initials = dispName(player).split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+  const palette = ["#C77F45", "#5B8FB0", "#9AD17A", "#D98A5B", "#A88BC4", "#E0A95B", "#7BA8A0", "#C96A6A"];
+  const color = palette[(player.name.charCodeAt(0) + player.name.length) % palette.length];
+  const isEmoji = player.avatar && !player.avatar.startsWith("#");
+  return (
+    <div style={{ width: size, height: size, borderRadius: "50%", background: isEmoji ? "rgba(255,255,255,0.1)" : color,
+      display: "grid", placeItems: "center", fontSize: isEmoji ? size * 0.55 : size * 0.4, fontWeight: 800, fontFamily: SANS,
+      color: "#1a0f08", flexShrink: 0, border: "2px solid rgba(255,255,255,0.2)" }}>
+      {isEmoji ? player.avatar : initials}
+    </div>
+  );
+}
+
+const AVATAR_EMOJIS = ["⛳", "🏌️", "🦅", "🐦", "🔥", "🍺", "😎", "🤠", "🦈", "🐐", "💪", "🌊", "☀️", "🌴", "🏆", "🎯"];
+
+function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, flash, setName }) {
+  const player = state.players.find((p) => p.id === playerId);
+  const [editName, setEditName] = useState(player?.displayName || "");
+  const [tab, setTab] = useState("scores");
+  if (!player) return null;
+  const canEdit = isMe || isCommish;
+
+  const myBets = state.bets.filter((b) => b.who === player.name);
+  const openBets = myBets.filter((b) => b.status === "pending");
+  const settledBets = myBets.filter((b) => b.status !== "pending");
+  const net = settledBets.reduce((s, b) => s + (b.status === "won" ? b.payout - b.stake : -b.stake), 0);
+
+  const saveName = async () => {
+    const nm = editName.trim();
+    // displayName is a nickname only; real name (login id) never changes. Blank = clear nickname.
+    const players = state.players.map((p) => p.id === playerId ? { ...p, displayName: nm } : p);
+    await save({ ...state, players });
+    flash(nm ? "Nickname set." : "Nickname cleared.");
+  };
+  const setAvatar = async (av) => {
+    const players = state.players.map((p) => p.id === playerId ? { ...p, avatar: av } : p);
+    await save({ ...state, players });
+  };
+
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div className="nz-glass" style={S.modalCard} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Avatar player={player} size={56} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: SERIF, fontSize: 22, color: C.cream }}>{dispName(player)}</div>
+            {hasNick(player) && <div style={{ fontFamily: SANS, fontSize: 12, color: C.fescue }}>{player.name}</div>}
+            <div style={{ fontFamily: SANS, fontSize: 13, color: C.copperLt }}>{fmtTP(tp.tp[player.id] || 0)} Tournament Points · hcp {player.h}</div>
+          </div>
+          <button style={S.xBtn} onClick={onClose}>✕</button>
+        </div>
+
+        {canEdit && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>AVATAR</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button onClick={() => setAvatar("")} style={{ ...S.avatarPick, ...(!player.avatar ? S.avatarPickOn : {}) }} title="initials">Aa</button>
+              {AVATAR_EMOJIS.map((e) => (
+                <button key={e} onClick={() => setAvatar(e)} style={{ ...S.avatarPick, ...(player.avatar === e ? S.avatarPickOn : {}) }}>{e}</button>
+              ))}
+            </div>
+            <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, margin: "12px 0 4px" }}>NICKNAME</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input className="nz-input" style={S.input} value={editName} onChange={(e) => setEditName(e.target.value)} placeholder={player.name} />
+              <button className="nz-small" style={S.smallBtn} onClick={saveName}>Save</button>
+            </div>
+            <p style={{ ...S.hint }}>Shows everywhere instead of your full name (your real name stays in small text underneath). Leave blank to just use your name. You always log in with your full name. Photo upload coming later.</p>
+          </div>
+        )}
+
+        {/* mini tab switch */}
+        <div style={{ display: "flex", gap: 4, marginTop: 16, borderBottom: `1px solid ${C.line}` }}>
+          {[["scores", "Scores"], ...(canEdit ? [["bets", "Bets"], ["money", "Money"]] : [])].map(([k, l]) => (
+            <button key={k} onClick={() => setTab(k)} style={{ ...S.profileTab, ...(tab === k ? S.profileTabOn : {}) }}>{l}</button>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 12, maxHeight: 320, overflowY: "auto" }}>
+          {tab === "scores" && ROUNDS.map((r) => {
+            const rs = player.scores[r.key] || {};
+            const thru = state.holes.filter((H) => rs[H.hole] != null).length;
+            let detail = "—";
+            if (thru) {
+              if (r.kind === "stableford") detail = `${playerStbl(state.holes, rs, player.h).pts} pts`;
+              else { const t = playerNetTotal(state.holes, rs, player.h); detail = `${t.gross} gross · ${t.net} net`; }
+            }
+            const earned = r.key === "r3" ? tp.detail.r3?.[player.id] : r.key === "r5" ? tp.detail.r5?.[player.id] : null;
+            return (
+              <div key={r.key} style={S.lbRow}>
+                <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>R{r.n} · {r.name}<span style={{ color: C.fescue, fontSize: 12 }}>  {thru ? `${thru}/18` : "not started"}</span></span>
+                <span style={{ fontFamily: SANS, color: C.cream, fontSize: 13 }}>{detail}{earned != null ? ` · ${fmtTP(earned)} TP` : ""}</span>
+              </div>
+            );
+          })}
+
+          {tab === "bets" && (openBets.length ? openBets.map((b) => (
+            <div key={b.id} style={S.openBetRow}><span style={{ flex: 1 }}>{b.label}</span>
+              <span style={{ fontFamily: SANS, color: C.copperLt }}>${b.stake} @ {b.oddsAtBet > 0 ? `+${b.oddsAtBet}` : b.oddsAtBet}</span></div>
+          )) : <p style={S.hint}>No open bets.</p>)}
+
+          {tab === "money" && (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", fontFamily: SANS }}>
+                <span style={{ color: C.fescue }}>Settled net</span>
+                <strong style={{ color: net > 0 ? C.birdie : net < 0 ? C.bogeyBad : C.cream }}>{net > 0 ? "+" : ""}${net.toFixed(2)}</strong>
+              </div>
+              {settledBets.length ? settledBets.map((b) => (
+                <div key={b.id} style={S.openBetRow}><span style={{ flex: 1 }}>{b.label}</span>
+                  <span style={{ fontFamily: SANS, color: b.status === "won" ? C.birdie : C.bogeyBad }}>{b.status === "won" ? `+$${(b.payout - b.stake).toFixed(2)}` : `-$${b.stake}`}</span></div>
+              )) : <p style={S.hint}>No settled bets yet.</p>}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PlayerLogin({ state, onLogin }) {
+  const [pid, setPid] = useState("");
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const player = state.players.find((p) => p.id === pid);
+  const isClaim = player && !player.pin; // no PIN set yet = first-time claim
+
+  const submit = async () => {
+    setErr("");
+    if (!pid) { setErr("Pick your name."); return; }
+    const r = await onLogin(pid, pin, isClaim);
+    if (!r.ok) { setErr(r.msg); setPin(""); }
+  };
+
+  return (
+    <div className="nz-glass" style={{ ...S.card, maxWidth: 420, margin: "16px auto 0" }}>
+      <div style={S.cardTitle}>Check In</div>
+      <p style={S.hint}>Pick your name and your 4-digit code. First time in, you set your code — after that it's how you log in on any device. This keeps anyone else from betting or scoring as you.</p>
+      <select className="nz-input" style={{ ...S.input, marginTop: 10 }} value={pid} onChange={(e) => { setPid(e.target.value); setErr(""); setPin(""); }}>
+        <option value="">Select your name…</option>
+        {state.players.map((p) => <option key={p.id} value={p.id}>{p.name}{p.pin ? "" : " (new)"}</option>)}
+      </select>
+      {player && (
+        <>
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS, marginBottom: 4 }}>{isClaim ? "Set your 4-digit code" : "Enter your 4-digit code"}</div>
+            <input className="nz-input" style={S.input} type="password" inputMode="numeric" maxLength={4} placeholder="• • • •" value={pin}
+              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
+          </div>
+          {isClaim && <p style={{ ...S.hint, color: C.copperLt }}>You're claiming "{player.name}" — pick a code you'll remember. The commissioner can reset it if you forget.</p>}
+          {err && <div style={{ color: C.bogeyBad, fontFamily: SANS, fontSize: 13, marginTop: 8 }}>{err}</div>}
+          <button className="nz-primary" style={S.primaryBtn} onClick={submit}>{isClaim ? "Claim & enter" : "Log in"}</button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function PinGate({ pinEntry, setPinEntry, onTry }) {
   return (
     <div className="nz-glass" style={S.card}>
@@ -1957,6 +2172,15 @@ function Style() {
     .nz-input{transition:border-color .2s ease,box-shadow .2s ease}.nz-input:focus{border-color:#F2A65A;box-shadow:0 0 0 3px rgba(242,166,90,.18)}
     @media (prefers-reduced-motion:reduce){*{animation:none!important}}
     ::-webkit-scrollbar{height:6px;width:6px}::-webkit-scrollbar-thumb{background:rgba(199,127,69,.4);border-radius:3px}
+    @media (min-width:1024px){
+      .nz-main{max-width:1000px!important}
+      /* turn each tab's vertical card stack into a balanced 2-column flow */
+      .nz-cols > div[style*="grid"]{display:block!important;column-count:2;column-gap:18px}
+      .nz-cols > div[style*="grid"] > *{break-inside:avoid;margin-bottom:18px;display:block}
+    }
+    @media (min-width:1400px){
+      .nz-main{max-width:1180px!important}
+    }
   `}</style>);
 }
 
@@ -1968,6 +2192,13 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  profileIconBtn: { background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'grid', placeItems: 'center' },
+  modalOverlay: { position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(8,6,12,0.7)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)', display: 'grid', placeItems: 'start center', padding: '40px 16px', overflowY: 'auto' },
+  modalCard: { width: '100%', maxWidth: 460, padding: 20, borderRadius: 18 },
+  avatarPick: { width: 38, height: 38, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)', fontSize: 18, cursor: 'pointer', display: 'grid', placeItems: 'center', color: '#F7F1E6' },
+  avatarPickOn: { borderColor: '#F2A65A', background: 'rgba(242,166,90,0.2)', boxShadow: '0 0 0 2px rgba(242,166,90,0.3)' },
+  profileTab: { background: 'none', border: 'none', borderBottom: '2px solid transparent', color: '#8a8595', fontFamily: SANS, fontSize: 14, padding: '8px 14px', cursor: 'pointer' },
+  profileTabOn: { color: '#F7F1E6', borderBottomColor: '#F2A65A' },
   myBetsHead: { fontSize: 11, letterSpacing: 1.5, color: '#8FA68E', fontFamily: SANS, marginTop: 10, marginBottom: 2 },
   parBadge: { display: 'inline-block', fontSize: 16, fontWeight: 800, fontFamily: SANS, color: '#1a0f08', background: 'linear-gradient(135deg, #F2C188, #C77F45)', padding: '3px 12px', borderRadius: 8, letterSpacing: 0.5 },
   scrambleHcpBox: { marginTop: 12, padding: '10px 12px', background: 'rgba(199,127,69,0.12)', border: '1px solid rgba(242,193,136,0.3)', borderRadius: 10 },
@@ -2012,7 +2243,7 @@ const S = {
   tabs: { display: "flex", gap: 2, padding: "8px 10px 0", overflowX: "auto", position: "sticky", top: 0, zIndex: 20, background: "rgba(14,11,20,0.75)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: `1px solid ${C.line}` },
   tab: { background: "none", border: "none", color: C.fescue, padding: "12px 14px", fontSize: 14, cursor: "pointer", fontFamily: SANS, borderBottom: "2px solid transparent", whiteSpace: "nowrap" },
   tabActive: { color: C.cream, borderBottom: `2px solid ${C.copperLt}` },
-  main: { padding: "18px 16px", maxWidth: 680, margin: "0 auto" },
+  main: { padding: "18px 16px", maxWidth: 680, margin: "0 auto", width: "100%" },
   card: { background: C.glass, border: `1px solid ${C.glassBorder}`, borderRadius: 18, padding: 18, boxShadow: "0 8px 30px rgba(0,0,0,0.25)" },
   myCard: { background: "linear-gradient(160deg, rgba(242,166,90,0.16), rgba(199,127,69,0.06))", border: "1px solid rgba(242,193,136,0.4)", borderRadius: 22, padding: 20, boxShadow: "0 10px 40px rgba(199,127,69,0.18)" },
   cardOpen: { background: "rgba(0,0,0,0.25)", border: `1px solid ${C.line}`, borderRadius: 12, padding: "10px 8px", margin: "4px 0 8px" },
