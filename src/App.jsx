@@ -62,6 +62,7 @@ const courseDefaults = (state) => ({
 const coursePar = (holes) => (holes || []).reduce((s, H) => s + (H.par || 0), 0);
 // Effective playing handicap for a player given the course settings.
 function courseHcp(index, state) {
+  if (index == null || isNaN(index)) return 0;
   const c = courseDefaults(state);
   if (!c.enabled) return index; // course adjustment off → use the raw index everywhere
   const par = coursePar(state.holes);
@@ -69,7 +70,7 @@ function courseHcp(index, state) {
   return Math.round(index * (c.slope / STANDARD_SLOPE) + ratingTerm);
 }
 // Resolve a player's effective handicap (course-adjusted if enabled). Use this in scoring.
-const effH = (p, state) => courseHcp(p.h, state);
+const effH = (p, state) => (p ? courseHcp(p.h, state) : 0);
 
 // ---- editable scoring rules (commish-configurable, with safe defaults) ----
 const RULES_DEFAULTS = {
@@ -1629,14 +1630,14 @@ function CommishRyder({ state, save, flash }) {
     <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 10, marginTop: 10 }}>
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, width: 50 }}>Team A</span>
-        <PlayerPicker value={m.xs[0]} pool={ry.teamA} onPick={(v) => updMatch(key2, m.id, { xs: partners ? [v, m.xs[1]] : [v] })} />
-        {partners && <PlayerPicker value={m.xs[1]} pool={ry.teamA} onPick={(v) => updMatch(key2, m.id, { xs: [m.xs[0], v] })} />}
+        <PlayerPicker value={m.xs[0]} pool={ry.teamA} onPick={(v) => updMatch(key2, m.id, { xs: partners ? [v, m.xs[1]].filter((x) => x != null) : [v].filter((x) => x != null) })} />
+        {partners && <PlayerPicker value={m.xs[1]} pool={ry.teamA} onPick={(v) => updMatch(key2, m.id, { xs: [m.xs[0], v].filter((x) => x != null) })} />}
         <button style={S.xBtn} onClick={() => rmMatch(key2, m.id)}>✕</button>
       </div>
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
         <span style={{ fontSize: 11, color: C.fescue, fontFamily: SANS, width: 50 }}>Team B</span>
-        <PlayerPicker value={m.ys[0]} pool={ry.teamB} onPick={(v) => updMatch(key2, m.id, { ys: partners ? [v, m.ys[1]] : [v] })} />
-        {partners && <PlayerPicker value={m.ys[1]} pool={ry.teamB} onPick={(v) => updMatch(key2, m.id, { ys: [m.ys[0], v] })} />}
+        <PlayerPicker value={m.ys[0]} pool={ry.teamB} onPick={(v) => updMatch(key2, m.id, { ys: partners ? [v, m.ys[1]].filter((x) => x != null) : [v].filter((x) => x != null) })} />
+        {partners && <PlayerPicker value={m.ys[1]} pool={ry.teamB} onPick={(v) => updMatch(key2, m.id, { ys: [m.ys[0], v].filter((x) => x != null) })} />}
       </div>
       <div style={{ marginTop: 8, padding: "7px 10px", background: "rgba(255,255,255,0.04)", borderRadius: 8, fontFamily: SANS, fontSize: 13, color }}>
         Auto: {res.final ? (res.result === "H" ? "Halved — ½ pt each" : `Team ${res.result === "X" ? "A" : "B"} wins ${res.status}`) : res.status}
@@ -2564,7 +2565,7 @@ function CommishClear({ state, liveSave, flash }) {
     flash("All scores wiped. Every round reopened.");
   };
   const gameDayReset = async () => {
-    if (!window.confirm("RESET FOR GAME DAY?\n\nThis wipes everything from testing:\n• all scores + scramble cards\n• all bets, settled history, the money board\n• all betting markets / wager lines\n• Ryder match pairings & results\n• nicknames and photos\n• unpauses the book\n\nKEEPS: player names, handicaps, login codes, scorecard, team names.\n\nCannot be undone.")) return;
+    if (!window.confirm("RESET FOR GAME DAY?\n\nThis wipes everything from testing:\n• all scores + scramble cards\n• all bets, settled history, the money board\n• all betting markets / wager lines\n• Ryder match pairings & results\n• R4 best-ball pairings & R6 final groups\n• nicknames and photos\n• unpauses the book\n\nKEEPS: player names, handicaps, login codes, scorecard, team names.\n\nCannot be undone.")) return;
     if (!window.confirm("Final check — this clears all test data and returns to a fresh start. Proceed?")) return;
     const latest = migrate((await loadState()) || state);
     const players = latest.players.map((p) => ({ ...p, scores: {}, submitted: {}, displayName: "", avatar: "" }));
@@ -2575,6 +2576,8 @@ function CommishClear({ state, liveSave, flash }) {
       markets: [],
       bookPaused: false,
       ryder: { ...latest.ryder, r1: [], r2: [], playoff: "" },
+      r4: { matches: [] },
+      r6: { champ: [], losers: [] },
       manualTP: {},
     });
     flash("Reset complete — fresh and ready for game day.");
