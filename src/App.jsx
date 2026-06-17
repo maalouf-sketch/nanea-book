@@ -197,6 +197,35 @@ export default function App() {
 
   const tp = useMemo(() => computeTP(state), [state]);
 
+  // Auto-settle any market whose outcome is now mathematically decided. Runs on the
+  // commissioners' devices (idempotent + last-write-wins, so it's safe). The moment a
+  // Ryder match/cup, over-under, or the tournament winner is decided, pending bets pay out.
+  useEffect(() => {
+    if (loading) return;
+    if (!COMMISH_NAMES.includes(me)) return; // only commish devices drive settlement
+    const toSettle = (state.markets || []).filter((m) => m.status !== "settled").map((m) => ({ m, o: marketOutcome(m, state, tp) })).filter((x) => x.o.decided && x.o.winningOptionId);
+    // also handle halved Ryder matches: decided (no winner) → all bets lose, market closes
+    const halvedMatches = (state.markets || []).filter((m) => m.status !== "settled" && m.kind === "match").map((m) => ({ m, o: marketOutcome(m, state, tp) })).filter((x) => x.o.halved);
+    if (!toSettle.length && !halvedMatches.length) return;
+    const run = async () => {
+      const latest = migrate((await loadState()) || state);
+      const latestTp = computeTP(latest);
+      let markets = latest.markets, bets = latest.bets, changed = false;
+      const apply = (mkt, winId) => {
+        markets = markets.map((m) => m.id === mkt.id ? { ...m, status: "settled", winnerId: winId } : m);
+        bets = bets.map((b) => (b.marketId === mkt.id && b.status === "pending") ? { ...b, status: (winId && b.optionId === winId) ? "won" : "lost" } : b);
+        changed = true;
+      };
+      latest.markets.filter((m) => m.status !== "settled").forEach((m) => {
+        const o = marketOutcome(m, latest, latestTp);
+        if (o.decided && o.winningOptionId) apply(m, o.winningOptionId);
+        else if (o.halved) apply(m, null); // halved match: no winner, all wagers lose
+      });
+      if (changed) { await saveState({ ...latest, markets, bets }); setState({ ...latest, markets, bets }); }
+    };
+    run().catch((e) => console.error("auto-settle failed", e));
+  }, [state, tp, me, loading]);
+
   if (loading) return <div style={S.shell}><Style /><Hero name="Nanea" sub="loading the book…" minimal /><div style={{ textAlign: "center", color: C.copperLt, letterSpacing: 4, marginTop: 30, fontFamily: SANS }}>NANEA</div></div>;
 
   return (
@@ -1694,20 +1723,97 @@ function refreshedOptions(market, state, tp) {
 
 // Should this market be closed to NEW bets? Locks when the outcome is decided or so
 // lopsided it's effectively decided, or when the commish has manually locked it.
-function marketLocked(market, state) {
+// Determine a market's outcome from live data.
+// Returns { decided, winningOptionId, lock, reason } — lock can be true before
+// fully decided (runaway lead). winningOptionId is only meaningful when decided.
+function marketOutcome(market, state, tp) {
+  const none = { decided: false, winningOptionId: null, lock: false, reason: "" };
+  const ry = state.ryder;
+
+  // ---- Ryder match (single match X vs Y) ----
+  if (market.kind === "match" && market.matchRef) {
+    const m = [...(ry.r1 || []), ...(ry.r2 || [])].find((x) => x.id === market.matchRef.id);
+    if (!m) return none;
+    const res = ryderMatchResult(state.holes, m, state, market.matchRef.roundKey);
+    if (res.final) {
+      const winId = res.result === "X" ? "X_" + m.id : res.result === "Y" ? "Y_" + m.id : null; // halved → no single winner
+      return { decided: winId != null, winningOptionId: winId, lock: true, reason: `Final — ${res.status}`, halved: res.result === "H" };
+    }
+    const remaining = 18 - res.thru;
+    if (Math.abs(res.up) > 0 && Math.abs(res.up) >= remaining - 1 && res.thru >= 9) return { ...none, lock: true, reason: `${Math.abs(res.up)} up, ${remaining} to play` };
+    return none;
+  }
+
+  // ---- Tournament Winner (outright; one option per player) ----
+  if (market.kind === "outright") {
+    const finished = state.players.filter((p) => playerNetTotal(state.holes, p.scores.r6, p.h).thru === 18).length;
+    const allDone = state.r6.champ.length > 0 && state.r6.champ.every((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, pl?.h).thru === 18; });
+    // Decided: championship group all finished R6 → lowest net in champ group wins the tournament.
+    if (allDone) {
+      let best = null, bestNet = Infinity;
+      state.r6.champ.forEach((id) => { const pl = state.players.find((x) => x.id === id); const net = playerNetTotal(state.holes, pl?.scores.r6, pl?.h).net; if (net < bestNet) { bestNet = net; best = id; } });
+      // tie at the top → not auto-decided (commish playoff)
+      const tied = state.r6.champ.filter((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, pl?.h).net === bestNet; });
+      if (best && tied.length === 1) return { decided: true, winningOptionId: best, lock: true, reason: "Tournament over — champion decided" };
+      return { ...none, lock: true, reason: "Final group done — tie, awaiting playoff" };
+    }
+    // Runaway lock: late in R6 and the TP leader is mathematically (or near) uncatchable.
+    const ranked = [...state.players].map((p) => ({ id: p.id, pts: tp.tp[p.id] })).sort((a, b) => b.pts - a.pts);
+    if (ranked.length >= 2 && state.r6.champ.length) {
+      const lead = ranked[0].pts - ranked[1].pts;
+      const champThru = state.r6.champ.map((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, pl?.h).thru; });
+      const minThru = Math.min(...champThru);
+      // R6 is the last points round; if leader is well clear and final group is deep into the round, lock.
+      if (lead >= 7 && minThru >= 14) return { ...none, lock: true, reason: "Leader pulling away late" };
+    }
+    return none;
+  }
+
+  // ---- Over/Under on Team A's Ryder points ----
+  if (market.kind === "overunder") {
+    const d = tp.detail.ryder;
+    if (!d) return none;
+    const ryderDone = (ry.r1 || []).every((m) => ryderMatchResult(state.holes, m, state, "r1").final) &&
+                      (ry.r2 || []).every((m) => ryderMatchResult(state.holes, m, state, "r2").final) &&
+                      ((ry.r1 || []).length + (ry.r2 || []).length) > 0;
+    const line = 3.5; // O/U 3.5
+    if (ryderDone) {
+      const over = d.aPts > line;
+      const opt = market.options.find((o) => (over ? /over/i : /under/i).test(o.label));
+      return { decided: !!opt, winningOptionId: opt?.optionId || null, lock: true, reason: "Ryder Cup complete" };
+    }
+    // clinch: if aPts already > line and remaining can't pull it back under, or vice versa
+    const totalMatches = (ry.r1 || []).length + (ry.r2 || []).length;
+    const played = (ry.r1 || []).filter((m) => ryderMatchResult(state.holes, m, state, "r1").final).length + (ry.r2 || []).filter((m) => ryderMatchResult(state.holes, m, state, "r2").final).length;
+    const remain = totalMatches - played;
+    if (totalMatches > 0) {
+      if (d.aPts > line && (d.aPts - line) > remain) return { ...none, lock: true, reason: "Over clinched" };
+      if ((line - d.aPts) > remain) return { ...none, lock: true, reason: "Under clinched" };
+    }
+    return none;
+  }
+
+  // ---- Ryder Cup Winner (prop with team-name options) ----
+  if (market.kind === "prop" && /cup winner/i.test(market.title || "")) {
+    const d = tp.detail.ryder;
+    if (!d || !d.winners) {
+      // clinch check: 3.5 of 6 wins
+      if (d) { if (d.aPts >= 3.5) return { ...none, lock: true, reason: "Team A clinched" }; if (d.bPts >= 3.5) return { ...none, lock: true, reason: "Team B clinched" }; }
+      return none;
+    }
+    const winnerName = d.winners === ry.teamA ? (ry.teamAName || "Team A") : (ry.teamBName || "Team B");
+    const opt = market.options.find((o) => o.label === winnerName);
+    return { decided: !!opt, winningOptionId: opt?.optionId || null, lock: true, reason: "Cup decided" };
+  }
+
+  return none; // fun props (longest drive, etc.) stay manual
+}
+
+function marketLocked(market, state, tp) {
   if (state.bookPaused) return { locked: true, reason: "Book paused" };
   if (market.locked) return { locked: true, reason: "Closed by commissioner" };
   if (market.status === "settled") return { locked: true, reason: "Settled" };
-  if (market.kind === "match" && market.matchRef) {
-    const m = [...(state.ryder.r1 || []), ...(state.ryder.r2 || [])].find((x) => x.id === market.matchRef.id);
-    if (m) {
-      const res = ryderMatchResult(state.holes, m, state, market.matchRef.roundKey);
-      if (res.final) return { locked: true, reason: `Final — ${res.status}` };
-      // lopsided & nearly decided: lead within 1 of clinching
-      const remaining = 18 - res.thru;
-      if (Math.abs(res.up) > 0 && Math.abs(res.up) >= remaining - 1 && res.thru >= 9) return { locked: true, reason: `${Math.abs(res.up)} up, ${remaining} to play` };
-    }
-  }
+  if (tp) { const o = marketOutcome(market, state, tp); if (o.lock) return { locked: true, reason: o.reason }; }
   return { locked: false };
 }
 
@@ -1721,7 +1827,7 @@ function BookView({ state, tp, me, setName, save, flash }) {
     if (!me) return flash("Check in with your name first.");
     if (!sel) return flash("Tap a line to bet.");
     const mkt = state.markets.find((x) => x.id === sel.marketId);
-    if (mkt && marketLocked(mkt, state).locked) { setSel(null); return flash("That market just closed."); }
+    if (mkt && marketLocked(mkt, state, tp).locked) { setSel(null); return flash("That market just closed."); }
     const s = parseFloat(stake);
     if (!s || s <= 0) return flash("Enter a stake.");
     const bet = { id: uid(), who: me, marketId: sel.marketId, optionId: sel.optionId, label: `${sel.title} — ${sel.label}`,
@@ -1787,7 +1893,7 @@ function BookView({ state, tp, me, setName, save, flash }) {
       {openMarkets.map((m) => {
         const opts = refreshedOptions(m, state, tp);
         const betsOnMarket = state.bets.filter((b) => b.marketId === m.id);
-        const lock = marketLocked(m, state);
+        const lock = marketLocked(m, state, tp);
         return (
           <div key={m.id} className="nz-glass" style={S.card}>
             <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "next_round" ? "NEXT ROUND" : m.kind === "match" ? "RYDER MATCH" : m.kind === "overunder" ? "OVER/UNDER" : "PROP"}</span>
@@ -1990,8 +2096,58 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await save({ ...state, markets });
   };
 
+  // ---- money summary (the book's exposure) ----
+  const pending = state.bets.filter((b) => b.status === "pending");
+  const settled = state.bets.filter((b) => b.status !== "pending");
+  const openStakes = pending.reduce((s, b) => s + b.stake, 0);
+  const openLiability = pending.reduce((s, b) => s + (b.payout - b.stake), 0); // profit owed if all open bets win
+  const settledPaidOut = settled.filter((b) => b.status === "won").reduce((s, b) => s + (b.payout - b.stake), 0);
+  const settledCollected = settled.filter((b) => b.status === "lost").reduce((s, b) => s + b.stake, 0);
+  const bookNetSoFar = settledCollected - settledPaidOut; // + = book is up
+  // per-player net (settled) + open exposure
+  const players = {};
+  state.bets.forEach((b) => {
+    if (!players[b.who]) players[b.who] = { net: 0, openStake: 0, openCould: 0 };
+    if (b.status === "won") players[b.who].net += (b.payout - b.stake);
+    else if (b.status === "lost") players[b.who].net -= b.stake;
+    else { players[b.who].openStake += b.stake; players[b.who].openCould += (b.payout - b.stake); }
+  });
+  const playerRows = Object.entries(players).sort((a, b) => (b[1].openCould + Math.abs(b[1].net)) - (a[1].openCould + Math.abs(a[1].net)));
+  // biggest single open risks
+  const biggestRisks = [...pending].sort((a, b) => (b.payout - b.stake) - (a.payout - a.stake)).slice(0, 4);
+
   return (
     <>
+      <div className="nz-glass" style={{ ...S.card, border: "1px solid rgba(242,166,90,0.35)" }}>
+        <div style={S.cardTitle}>💰 The Book — Money Summary</div>
+        <p style={S.hint}>Everything the book is exposed to right now. "Liability" = profit you'd owe bettors if their open bets win (stakes returned on top).</p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+          <div style={S.sumBox}><div style={S.sumLabel}>OPEN BETS</div><div style={S.sumBig}>{pending.length}</div><div style={S.sumSub}>${openStakes.toFixed(0)} staked</div></div>
+          <div style={S.sumBox}><div style={S.sumLabel}>OPEN LIABILITY</div><div style={{ ...S.sumBig, color: C.bogeyBad }}>${openLiability.toFixed(0)}</div><div style={S.sumSub}>if all open bets win</div></div>
+          <div style={S.sumBox}><div style={S.sumLabel}>SETTLED — BOOK NET</div><div style={{ ...S.sumBig, color: bookNetSoFar >= 0 ? C.birdie : C.bogeyBad }}>{bookNetSoFar >= 0 ? "+" : ""}${bookNetSoFar.toFixed(0)}</div><div style={S.sumSub}>collected ${settledCollected.toFixed(0)} · paid ${settledPaidOut.toFixed(0)}</div></div>
+          <div style={S.sumBox}><div style={S.sumLabel}>WORST CASE</div><div style={{ ...S.sumBig, color: C.bogeyBad }}>{(bookNetSoFar - openLiability) >= 0 ? "+" : "−"}${Math.abs(bookNetSoFar - openLiability).toFixed(0)}</div><div style={S.sumSub}>if every open bet wins</div></div>
+        </div>
+
+        {playerRows.length > 0 && <>
+          <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, margin: "16px 0 6px" }}>PER PLAYER</div>
+          <div style={{ ...S.lbRow, ...S.lbHead }}><span style={{ flex: 1 }}>Player</span><span style={{ width: 70, textAlign: "right" }}>Settled</span><span style={{ width: 88, textAlign: "right" }}>Open → win</span></div>
+          {playerRows.map(([who, v]) => (
+            <div key={who} style={S.lbRow}>
+              <span style={{ flex: 1 }}>{who}</span>
+              <span style={{ width: 70, textAlign: "right", fontFamily: SANS, fontWeight: 700, color: v.net > 0 ? C.birdie : v.net < 0 ? C.bogeyBad : C.fescue }}>{v.net > 0 ? "+" : ""}{v.net ? "$" + v.net.toFixed(0) : "—"}</span>
+              <span style={{ width: 88, textAlign: "right", fontFamily: SANS, color: C.copperLt }}>{v.openStake ? `$${v.openStake.toFixed(0)} → +$${v.openCould.toFixed(0)}` : "—"}</span>
+            </div>
+          ))}
+        </>}
+
+        {biggestRisks.length > 0 && <>
+          <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, margin: "16px 0 6px" }}>BIGGEST OPEN RISKS</div>
+          {biggestRisks.map((b) => (
+            <div key={b.id} style={S.openBetRow}><span style={{ flex: 1 }}>{b.who} · {b.label}</span><span style={{ fontFamily: SANS, color: C.bogeyBad }}>owe +${(b.payout - b.stake).toFixed(0)}</span></div>
+          ))}
+        </>}
+      </div>
+
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Tournament Winner — Set Opening Lines</div>
         <p style={S.hint}>Set each player's opening odds (American, e.g. +650 or -120). These anchor the market and drift automatically as scores and points come in. Blank = +800 default.</p>
@@ -2088,7 +2244,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
                 <button style={S.xBtn} onClick={() => rmMarket(m.id)}>✕</button>
               </div>
             </div>
-            <div style={S.kindTag}>{m.status === "settled" ? "SETTLED" : marketLocked(m, state).locked ? "CLOSED · " + marketLocked(m, state).reason : m.kind.toUpperCase()}</div>
+            <div style={S.kindTag}>{m.status === "settled" ? "SETTLED" : marketLocked(m, state, tp).locked ? "CLOSED · " + marketLocked(m, state, tp).reason : m.kind.toUpperCase()}</div>
             <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
               {opts.map((o) => (
                 <div key={o.optionId} style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -2527,6 +2683,10 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  sumBox: { background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, padding: '12px 14px' },
+  sumLabel: { fontSize: 10, letterSpacing: 1.2, color: '#8a8595', fontFamily: 'Helvetica, Arial, sans-serif' },
+  sumBig: { fontSize: 26, fontWeight: 800, fontFamily: 'Helvetica, Arial, sans-serif', color: '#F7F1E6', marginTop: 2 },
+  sumSub: { fontSize: 11, color: '#8a8595', fontFamily: 'Helvetica, Arial, sans-serif', marginTop: 2 },
   profileIconBtn: { background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'grid', placeItems: 'center' },
   modalOverlay: { position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(8,6,12,0.7)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)', display: 'grid', placeItems: 'start center', padding: '40px 16px', overflowY: 'auto' },
   modalCard: { width: '100%', maxWidth: 460, padding: 20, borderRadius: 18 },
