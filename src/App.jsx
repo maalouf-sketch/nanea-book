@@ -1200,6 +1200,7 @@ function RulesView({ state }) {
 
       <Rule tag="THE BOOK" title="Betting">
         Friendly wagers with auto-generated odds that move with handicaps and live position. Your bet locks at the odds shown when you place it. Markets close automatically once an outcome is decided, and the commissioner can pause the book anytime. Settle up at the clubhouse.
+        <div style={{ marginTop: 8, color: C.copperLt, fontSize: 13 }}><b>Halved matches:</b> if a Ryder match (singles or scramble) ends tied, all bets on that match <b>lose</b> — a tie is not a push. Bet accordingly.</div>
       </Rule>
     </div>
   );
@@ -1781,7 +1782,11 @@ function CommishTP({ state, save, flash, tp }) {
 // ============================================================
 
 const americanToMult = (o) => (o > 0 ? 1 + o / 100 : 1 + 100 / Math.abs(o));
-const probToAmerican = (p) => { p = Math.max(0.04, Math.min(0.90, p)); return p >= 0.5 ? -Math.round((p / (1 - p)) * 100) : Math.round(((1 - p) / p) * 100); };
+const probToAmerican = (p, floor = 0.04, ceil = 0.92) => { p = Math.max(floor, Math.min(ceil, p)); return p >= 0.5 ? -Math.round((p / (1 - p)) * 100) : Math.round(((1 - p) / p) * 100); };
+// Probability floors per market type → caps the longshot price.
+// ~+350 worst on 2-way (matches/cup/OU); ~+800 worst on multi-runner (outright/props).
+const FLOOR_TWOWAY = 0.225;   // 0.225 → about +345
+const FLOOR_MULTI = 0.112;    // 0.112 → about +795
 const softmax = (s, t = 1) => { const m = Math.max(...s); const e = s.map((x) => Math.exp((x - m) / t)); const sum = e.reduce((a, b) => a + b, 0); return e.map((x) => x / sum); };
 const round5 = (n) => { const a = Math.abs(n); let r; if (a < 150) r = Math.round(a / 5) * 5; else if (a < 300) r = Math.round(a / 10) * 10; else r = Math.round(a / 25) * 25; return n < 0 ? -r : r; };
 // Apply the book's margin on the PROBABILITY side, then convert to American odds.
@@ -1809,12 +1814,17 @@ function playerLiveEdge(state, pid, roundKey) {
 // Money-balancing: shade an option's probability toward where the stakes are.
 // More money on a side -> its implied prob rises (odds shorten), the other lengthens.
 // strength = base softmax probs (array), stakes = array of $ on each option.
-function shadeForMoney(probs, stakes, weight = 0.25) {
+function shadeForMoney(probs, stakes, weight = 0.30) {
   const total = stakes.reduce((a, b) => a + b, 0);
   if (total <= 0) return probs;
+  // Don't let small money swing the line. The shade ramps in only once there's real
+  // action: ~0 effect under $50, scaling toward full weight around $300+ total.
+  const MONEY_FULL = 300, MONEY_MIN = 50;
+  if (total < MONEY_MIN) return probs;
+  const ramp = Math.min(1, (total - MONEY_MIN) / (MONEY_FULL - MONEY_MIN));
+  const w = weight * ramp;
   const moneyShare = stakes.map((s) => s / total);
-  // blend: final = (1-w)*model + w*money. Keeps model primary, nudges toward the book.
-  const blended = probs.map((p, i) => (1 - weight) * p + weight * moneyShare[i]);
+  const blended = probs.map((p, i) => (1 - w) * p + w * moneyShare[i]);
   const sum = blended.reduce((a, b) => a + b, 0);
   return blended.map((x) => x / sum);
 }
@@ -1846,7 +1856,19 @@ function autoOddsByTP(state, tp, marketId, openOdds) {
     probs = softmax(strengths, 10);
   }
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, ps.map((p) => p.id)));
-  return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i])) }));
+  return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i], FLOOR_MULTI)) }));
+}
+
+// The Armadillo — who finishes LAST. Lowest TP / worst live position is the favorite to lose.
+function autoOddsArmadillo(state, tp, marketId) {
+  const ps = state.players.map((p) => ({ id: p.id, name: dispName(p), tp: tp.tp[p.id] }));
+  const liveRound = currentLiveRound(state);
+  const maxTp = Math.max(1, ...ps.map((p) => p.tp));
+  // invert: fewer points (and worse live play) = MORE likely to be the loser
+  const strengths = ps.map((p) => (maxTp - p.tp) - (liveRound ? 0.6 * playerLiveEdge(state, p.id, liveRound) : 0));
+  let probs = softmax(strengths, 10);
+  if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, ps.map((p) => p.id)));
+  return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i], FLOOR_MULTI)) }));
 }
 
 // the round most likely "in progress" — the lowest-numbered round with partial scores
@@ -1874,8 +1896,10 @@ function autoOddsForMatch(state, m, roundKey, marketId) {
   const res = ryderMatchResult(state.holes, m, state, roundKey);
   const up = res.up; // + = X ahead
   const remaining = Math.max(1, 18 - res.thru);
-  // dominance: lead relative to what's catchable. ~0.1 early, ->1 as lead approaches remaining.
-  const dominance = Math.sign(up) * Math.min(1, Math.pow(Math.abs(up) / Math.max(remaining, Math.abs(up)), 0.85)) * Math.abs(up);
+  // dominance: a live lead should move the line HARD — being up means you're the better
+  // player or they're having an off day. Scales up with lead size and as holes run out.
+  const leadFrac = Math.abs(up) / Math.max(remaining, Math.abs(up)); // 0..1, bigger when lead approaches holes left
+  const dominance = Math.sign(up) * Math.pow(leadFrac, 0.6) * Math.abs(up);
   const liveX = baseX + dominance * 1.6, liveY = baseY - dominance * 1.6;
   let probs = res.final
     ? (res.result === "X" ? [0.97, 0.03] : res.result === "Y" ? [0.03, 0.97] : [0.5, 0.5])
@@ -1884,8 +1908,8 @@ function autoOddsForMatch(state, m, roundKey, marketId) {
   const optIds = ["X_" + m.id, "Y_" + m.id];
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, optIds));
   return [
-    { optionId: optIds[0], label: label(m.xs), odds: withVig(probToAmerican(probs[0])), manual: false },
-    { optionId: optIds[1], label: label(m.ys), odds: withVig(probToAmerican(probs[1])), manual: false },
+    { optionId: optIds[0], label: label(m.xs), odds: withVig(probToAmerican(probs[0], FLOOR_TWOWAY)), manual: false },
+    { optionId: optIds[1], label: label(m.ys), odds: withVig(probToAmerican(probs[1], FLOOR_TWOWAY)), manual: false },
   ];
 }
 
@@ -1901,8 +1925,8 @@ function autoOddsOverUnder(state, tp, marketId) {
   const optIds = ["over", "under"];
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, optIds));
   return [
-    { optionId: "over", label: "Over 3.5", odds: withVig(probToAmerican(probs[0])), manual: false },
-    { optionId: "under", label: "Under 3.5", odds: withVig(probToAmerican(probs[1])), manual: false },
+    { optionId: "over", label: "Over 3.5", odds: withVig(probToAmerican(probs[0], FLOOR_TWOWAY)), manual: false },
+    { optionId: "under", label: "Under 3.5", odds: withVig(probToAmerican(probs[1], FLOOR_TWOWAY)), manual: false },
   ];
 }
 
@@ -1920,10 +1944,12 @@ function refreshedOptions(market, state, tp) {
     const auto = autoOddsOverUnder(state, tp, market.id);
     return market.options.map((o) => o.manual ? o : (auto.find((a) => a.optionId === o.optionId) ? { ...o, odds: auto.find((a) => a.optionId === o.optionId).odds } : o));
   }
+  if (market.kind === "armadillo") {
+    const auto = autoOddsArmadillo(state, tp, market.id);
+    return market.options.map((o) => o.manual ? o : (auto.find((x) => x.id === o.optionId) ? { ...o, odds: auto.find((x) => x.id === o.optionId).odds } : o));
+  }
   return market.options;
 }
-
-// Should this market be closed to NEW bets? Locks when the outcome is decided or so
 // lopsided it's effectively decided, or when the commish has manually locked it.
 // Determine a market's outcome from live data.
 // Returns { decided, winningOptionId, lock, reason } — lock can be true before
@@ -1967,6 +1993,19 @@ function marketOutcome(market, state, tp) {
       const minThru = Math.min(...champThru);
       // R6 is the last points round; if leader is well clear and final group is deep into the round, lock.
       if (lead >= 7 && minThru >= 14) return { ...none, lock: true, reason: "Leader pulling away late" };
+    }
+    return none;
+  }
+
+  // ---- The Armadillo (who finishes last; option per player) ----
+  if (market.kind === "armadillo") {
+    const losersDone = state.r6.losers.length > 0 && state.r6.losers.every((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)).thru === 18; });
+    if (losersDone) {
+      let worst = null, worstNet = -Infinity;
+      state.r6.losers.forEach((id) => { const pl = state.players.find((x) => x.id === id); const net = playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)).net; if (net > worstNet) { worstNet = net; worst = id; } });
+      const tied = state.r6.losers.filter((id) => { const pl = state.players.find((x) => x.id === id); return playerNetTotal(state.holes, pl?.scores.r6, effH(pl, state)).net === worstNet; });
+      if (worst && tied.length === 1) return { decided: true, winningOptionId: worst, lock: true, reason: "The Armadillo has been crowned" };
+      return { ...none, lock: true, reason: "Losers group done — tie, awaiting playoff" };
     }
     return none;
   }
@@ -2121,16 +2160,17 @@ function BookView({ state, tp, me, setName, save, flash, isCommish }) {
         const lock = marketLocked(m, state, tp);
         return (
           <div key={m.id} className="nz-glass" style={S.card}>
-            <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "next_round" ? "NEXT ROUND" : m.kind === "match" ? "RYDER MATCH" : m.kind === "overunder" ? "OVER/UNDER" : "PROP"}</span>
+            <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "armadillo" ? "🦫 THE ARMADILLO" : m.kind === "next_round" ? "NEXT ROUND" : m.kind === "match" ? "RYDER MATCH" : m.kind === "overunder" ? "OVER/UNDER" : "PROP"}</span>
               {lock.locked ? <span style={{ ...S.kindTag, color: C.bogeyBad }}>🔒 CLOSED</span> : m.live && <span style={{ ...S.kindTag, color: C.birdie }}>● LIVE ODDS</span>}</div>
             <div style={S.cardTitle}>{m.title}</div>
+            {m.kind === "match" && <div style={{ fontSize: 11.5, color: C.copperLt, fontFamily: SANS, marginTop: 3, fontStyle: "italic" }}>House rule: if this match is halved (tied), all bets on it lose — a tie is not a push.</div>}
             {lock.locked && <div style={{ fontSize: 12, color: C.bogeyBad, fontFamily: SANS, marginTop: 2 }}>Betting closed — {lock.reason}</div>}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {opts.map((o) => {
                 const active = sel && sel.marketId === m.id && sel.optionId === o.optionId;
                 const moneyOn = betsOnMarket.filter((b) => b.optionId === o.optionId && b.status === "pending").reduce((s, b) => s + b.stake, 0);
                 return (
-                  <button key={o.optionId} className="nz-oddsbtn" disabled={lock.locked} onClick={() => !lock.locked && setSel({ marketId: m.id, optionId: o.optionId, label: o.label, odds: o.odds, title: m.title })}
+                  <button key={o.optionId} className="nz-oddsbtn" disabled={lock.locked} onClick={() => !lock.locked && setSel({ marketId: m.id, optionId: o.optionId, label: o.label, odds: o.odds, title: m.title, kind: m.kind })}
                     style={{ ...S.oddsChip, ...(active ? S.oddsSelected : {}), ...(lock.locked ? { opacity: 0.45, cursor: "not-allowed" } : {}) }}>
                     <span style={S.oddsLabel}>{o.label}</span>
                     <span style={S.oddsNum}>{o.odds > 0 ? `+${o.odds}` : o.odds}{o.manual ? " ✎" : ""}</span>
@@ -2169,6 +2209,7 @@ function BookView({ state, tp, me, setName, save, flash, isCommish }) {
             </div>
           )}
           <div style={S.slipPick}>{sel.title}<br /><strong style={{ color: C.copperLt }}>{sel.label}</strong> @ {sel.odds > 0 ? `+${sel.odds}` : sel.odds}</div>
+          {sel.kind === "match" && <div style={{ fontSize: 11.5, color: C.copperLt, fontFamily: SANS, marginTop: 6, fontStyle: "italic" }}>Heads up: if the match is halved (tied), this bet loses — a tie is not a push.</div>}
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
             <span style={{ color: C.cream, opacity: 0.8 }}>$</span>
             <input className="nz-input" style={S.input} type="number" placeholder="stake" value={stake} onChange={(e) => setStake(e.target.value)} />
@@ -2270,6 +2311,14 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await save({ ...state, markets: [...state.markets, m] });
     flash("Tournament winner market opened — opening lines set, will drift with scores.");
   };
+  const openArmadillo = async () => {
+    if (state.markets.some((m) => m.kind === "armadillo" && m.status !== "settled")) { flash("The Armadillo market is already open."); return; }
+    const auto = autoOddsArmadillo(state, tp);
+    const m = { id: uid(), title: "The Armadillo (Tournament Loser)", kind: "armadillo", live: true, status: "open",
+      options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
+    await save({ ...state, markets: [...state.markets, m] });
+    flash("The Armadillo market opened — odds invert the winner market, settles on the tournament loser.");
+  };
   const openNextRound = async () => {
     const auto = autoOddsByTP(state, tp);
     const m = { id: uid(), title: "Wins the Next Round", kind: "next_round", live: true, status: "open",
@@ -2311,8 +2360,8 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     const sumH = (ids) => ids.reduce((s, id) => s + (P2(id)?.h || 0), 0);
     const probs = softmax([-sumH(state.ryder.teamA), -sumH(state.ryder.teamB)], 12);
     const m = { id: uid(), title: "Ryder Cup Winner", kind: "prop", live: false, status: "open", options: [
-      { optionId: uid(), label: state.ryder.teamAName || "Team A", odds: withVig(probToAmerican(probs[0])), manual: true },
-      { optionId: uid(), label: state.ryder.teamBName || "Team B", odds: withVig(probToAmerican(probs[1])), manual: true },
+      { optionId: uid(), label: state.ryder.teamAName || "Team A", odds: withVig(probToAmerican(probs[0], FLOOR_TWOWAY)), manual: true },
+      { optionId: uid(), label: state.ryder.teamBName || "Team B", odds: withVig(probToAmerican(probs[1], FLOOR_TWOWAY)), manual: true },
     ] };
     await save({ ...state, markets: [...state.markets, m] });
     flash("Cup winner market opened.");
@@ -2438,6 +2487,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
         <p style={S.hint}>One tap — auto-priced off handicaps and live position, and they auto-close once decided.</p>
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
           <button className="nz-small" style={S.smallBtn} onClick={openNextRound}>+ Wins Next Round</button>
+          <button className="nz-small" style={S.smallBtn} onClick={openArmadillo}>+ 🦫 The Armadillo</button>
           <button className="nz-small" style={S.smallBtn} onClick={openAllMatches}>+ All Ryder Matches</button>
           <button className="nz-small" style={S.smallBtn} onClick={openOverUnder}>+ Ryder Pts O/U 3.5</button>
           <button className="nz-small" style={S.smallBtn} onClick={openCupWinner}>+ Ryder Cup Winner</button>
