@@ -491,7 +491,7 @@ function RyderMatchScorecard({ state, m, roundKey, nameA, nameB }) {
 
   return (
     <div style={S.cardOpen}>
-      <div style={{ overflowX: "auto" }}>
+      <div className="nz-xscroll">
         <table style={{ ...S.scTable, minWidth: 560 }}><tbody>
           <tr><td style={S.scLbl}>Hole</td>{holes.map((H) => <td key={H.hole} style={S.scH}>{H.hole}</td>)}</tr>
           <tr><td style={S.scLbl}>Par</td>{holes.map((H) => <td key={H.hole} style={S.scPar}>{H.par}</td>)}</tr>
@@ -960,7 +960,7 @@ function Scorecard({ player, holes, roundKey }) {
   const front = holes.slice(0, 9), back = holes.slice(9);
   const sumNet = (arr) => arr.reduce((s, H) => s + (rs[H.hole] != null ? netHole(rs[H.hole], H.si, player.h) : 0), 0);
   const Nine = ({ hs, label }) => (
-    <div style={{ overflowX: "auto" }}>
+    <div className="nz-xscroll">
       <table style={S.scTable}><tbody>
         <tr><td style={S.scLbl}>Hole</td>{hs.map((H) => <td key={H.hole} style={S.scH}>{H.hole}</td>)}<td style={S.scTot}>{label}</td></tr>
         <tr><td style={S.scLbl}>Par</td>{hs.map((H) => <td key={H.hole} style={S.scPar}>{H.par}</td>)}<td style={S.scTot}>{hs.reduce((s, H) => s + H.par, 0)}</td></tr>
@@ -1383,7 +1383,7 @@ function CommishSetup({ state, save, flash }) {
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Scorecard — Par & Stroke Index</div>
         <p style={S.hint}>Enter the real Nanea stroke index (1 = hardest hole). Net strokes allocate by these.</p>
-        <div style={{ overflowX: "auto", marginTop: 8 }}>
+        <div className="nz-xscroll" style={{ marginTop: 8 }}>
           <table style={{ ...S.scTable, minWidth: 520 }}><tbody>
             <tr><td style={S.scLbl}>Hole</td>{state.holes.map((H) => <td key={H.hole} style={S.scH}>{H.hole}</td>)}</tr>
             <tr><td style={S.scLbl}>Par</td>{state.holes.map((H) => <td key={H.hole} style={{ padding: 2 }}><input style={S.miniInput} type="number" defaultValue={H.par} onBlur={(e) => setPar(H.hole, e.target.value)} /></td>)}</tr>
@@ -2735,7 +2735,7 @@ const S = {
   commishBadge: { fontSize: 9.5, letterSpacing: 1.5, background: "rgba(199,127,69,0.9)", color: "#1a0f08", padding: "4px 9px", borderRadius: 20, fontFamily: SANS, fontWeight: 700 },
   youBadge: { fontSize: 12, color: C.cream, fontFamily: SANS, background: "rgba(255,255,255,0.12)", padding: "4px 11px", borderRadius: 20 },
   namePrompt: { display: "flex", gap: 10, alignItems: "center", padding: "14px 18px 4px", flexWrap: "wrap" },
-  tabs: { display: "flex", gap: 2, padding: "8px 10px 0", overflowX: "auto", position: "sticky", top: 0, zIndex: 20, background: "rgba(14,11,20,0.75)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: `1px solid ${C.line}` },
+  tabs: { display: "flex", gap: 2, padding: "8px 10px 0", overflowX: "auto", WebkitOverflowScrolling: "touch", position: "sticky", top: 0, zIndex: 20, background: "rgba(14,11,20,0.75)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: `1px solid ${C.line}` },
   tab: { background: "none", border: "none", color: C.fescue, padding: "12px 14px", fontSize: 14, cursor: "pointer", fontFamily: SANS, borderBottom: "2px solid transparent", whiteSpace: "nowrap" },
   tabActive: { color: C.cream, borderBottom: `2px solid ${C.copperLt}` },
   main: { padding: "18px 16px", maxWidth: 680, margin: "0 auto", width: "100%" },
