@@ -84,3 +84,43 @@ export function subscribe(onChange) {
 
   return () => { try { sb.removeChannel(channel); } catch {} clearInterval(poll); };
 }
+
+// ============================================================
+// Photo upload — resizes the image to a small square and stores it
+// in the "avatars" Supabase Storage bucket, returning a public URL.
+// Requires a public bucket named "avatars" (see SUPABASE_SETUP.sql notes).
+// ============================================================
+const AVATAR_BUCKET = "avatars";
+
+// Resize an image File to a square JPEG (max `size` px) and return a Blob.
+function resizeImage(file, size = 256) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const canvas = document.createElement("canvas");
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      // center-crop to square
+      const min = Math.min(img.width, img.height);
+      const sx = (img.width - min) / 2, sy = (img.height - min) / 2;
+      ctx.drawImage(img, sx, sy, min, min, 0, 0, size, size);
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("resize failed")), "image/jpeg", 0.82);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not read that image. Try a JPG or PNG.")); };
+    img.src = url;
+  });
+}
+
+// Upload a player's photo. Returns a public URL string.
+export async function uploadAvatar(playerId, file) {
+  const sb = getClient();
+  if (!sb) throw new Error("No connection.");
+  const blob = await resizeImage(file, 256);
+  const path = `player-${playerId}-${Date.now()}.jpg`;
+  const { error } = await sb.storage.from(AVATAR_BUCKET).upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+  if (error) throw new Error(error.message);
+  const { data } = sb.storage.from(AVATAR_BUCKET).getPublicUrl(path);
+  return data.publicUrl;
+}
