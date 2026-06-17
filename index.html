@@ -9,9 +9,11 @@
     <title>The Nanea Book</title>
     <style>
       html, body, #root { height: 100%; margin: 0; background: #0E0B14; }
-      html, body { max-width: 100%; overflow-x: hidden; overscroll-behavior-x: none; }
+      body { max-width: 100%; overflow-x: hidden; }
       *, *::before, *::after { box-sizing: border-box; }
       body { -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+      /* horizontal scrollers (wide scorecards) must still swipe on touch */
+      .nz-xscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; touch-action: pan-x pan-y; max-width: 100%; }
     </style>
   </head>
   <body>
@@ -19,3 +21,4 @@
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
+
