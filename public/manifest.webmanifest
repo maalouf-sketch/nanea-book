@@ -1,0 +1,23 @@
+{
+  "name": "The Clarey Invitational",
+  "short_name": "Nanea",
+  "description": "Live scoring and the book for the Nanea golf trip.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0E0B14",
+  "theme_color": "#0E0B14",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
