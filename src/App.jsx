@@ -132,11 +132,18 @@ export default function App() {
       {toast && <div className="nz-toast" style={S.toast}>{toast}</div>}
       <Hero name={state.tournamentName} sub={`Par ${state.holes.reduce((s, h) => s + h.par, 0)} · Mount Hualālai · 8-player net tournament`} badge={isCommish ? "COMMISSIONER" : me} />
 
-      {!me && (
+      {!me ? (
         <div style={S.namePrompt} className="nz-fade">
           <span style={{ color: C.cream, fontSize: 14, fontFamily: SANS, opacity: 0.85 }}>Check in —</span>
           <select className="nz-input" style={{ ...S.inputInline, minWidth: 160 }} defaultValue="" onChange={(e) => e.target.value && setName(e.target.value)}>
             <option value="" disabled>pick your name</option>
+            {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+          </select>
+        </div>
+      ) : (
+        <div style={S.switcherRow} className="nz-fade">
+          <span style={{ color: C.fescue, fontSize: 12, fontFamily: SANS }}>Playing as</span>
+          <select className="nz-input" style={S.switcher} value={me} onChange={(e) => setName(e.target.value)}>
             {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
           </select>
         </div>
@@ -151,7 +158,7 @@ export default function App() {
       <main style={S.main}>
         <div key={tab} className="nz-page">
           {tab === "standings" && <Standings state={state} tp={tp} />}
-          {tab === "scoring" && <Scoring state={state} me={me} setName={setName} save={save} />}
+          {tab === "scoring" && <Scoring state={state} me={me} setName={setName} save={save} isCommish={isCommish} />}
           {tab === "rounds" && <RoundsView state={state} tp={tp} />}
           {tab === "bets" && <BookView state={state} tp={tp} me={me} setName={setName} save={save} flash={flash} />}
           {tab === "commish" && (isCommish
@@ -168,7 +175,7 @@ function migrate(s) {
   const base = JSON.parse(JSON.stringify(DEFAULT_STATE));
   const merged = { ...base, ...s };
   merged.holes = s.holes || base.holes;
-  merged.players = (s.players || base.players).map((p) => ({ ...p, scores: p.scores || {} }));
+  merged.players = (s.players || base.players).map((p) => ({ ...p, scores: p.scores || {}, submitted: p.submitted || {} }));
   merged.ryder = { ...base.ryder, ...(s.ryder || {}) };
   merged.r4 = { ...base.r4, ...(s.r4 || {}) };
   merged.r6 = { ...base.r6, ...(s.r6 || {}) };
@@ -306,8 +313,9 @@ function RyderBanner({ state, tp }) {
         </div>
       </div>
       {d.winners
-        ? <div style={{ textAlign: "center", color: C.birdie, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>Team {d.winners === state.ryder.teamA ? "A" : "B"} wins — +2 TP each</div>
+        ? <div style={{ textAlign: "center", color: C.birdie, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>Team {d.winners === state.ryder.teamA ? "A" : "B"} wins the Cup — each player on the team gets +2 TP</div>
         : <div style={{ textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13, marginTop: 6 }}>{d.aPts === d.bPts && (d.aPts + d.bPts) > 0 ? "All square — captain playoff needed" : "In progress"}</div>}
+      <p style={{ ...S.hint, textAlign: "center" }}>6 points are up for grabs across the 2 scramble + 4 singles matches combined. Win the majority and every player on the winning team earns 2 Tournament Points — it's one team prize for the combined result, not 2 points per match.</p>
     </div>
   );
 }
@@ -315,7 +323,7 @@ function RyderBanner({ state, tp }) {
 // ============================================================
 // LIVE SCORING — per round, each player enters own card
 // ============================================================
-function Scoring({ state, me, setName, save }) {
+function Scoring({ state, me, setName, save, isCommish }) {
   const [roundKey, setRoundKey] = useState("r3");
   const [open, setOpen] = useState(null);
   const holes = state.holes;
@@ -332,13 +340,40 @@ function Scoring({ state, me, setName, save }) {
     await save({ ...state, players });
   };
 
+  const submitRound = async (playerId, rKey) => {
+    const players = state.players.map((p) => p.id !== playerId ? p
+      : { ...p, submitted: { ...(p.submitted || {}), [rKey]: true } });
+    await save({ ...state, players });
+  };
+  const reopenRound = async (playerId, rKey) => {
+    const players = state.players.map((p) => p.id !== playerId ? p
+      : { ...p, submitted: { ...(p.submitted || {}), [rKey]: false } });
+    await save({ ...state, players });
+  };
+  const clearRound = async (playerId, rKey) => {
+    const players = state.players.map((p) => {
+      if (p.id !== playerId) return p;
+      const scores = { ...p.scores }; delete scores[rKey];
+      return { ...p, scores, submitted: { ...(p.submitted || {}), [rKey]: false } };
+    });
+    await save({ ...state, players });
+  };
+  const isSubmitted = (p) => !!(p.submitted && p.submitted[roundKey]);
+
+  // par played so far (for net-to-par display)
+  const parThru = (rs) => holes.reduce((s, H) => s + (rs[H.hole] != null ? H.par : 0), 0);
+
   // leaderboard for this round
   const rows = state.players.map((p) => {
     const rs = p.scores[roundKey] || {};
-    if (round.kind === "stableford") { const s = playerStbl(holes, rs, p.h); return { p, primary: s.pts, thru: s.thru, label: `${s.pts} pts`, higher: true }; }
     const t = playerNetTotal(holes, rs, p.h);
-    return { p, primary: t.net, thru: t.thru, label: t.thru ? `${t.net} net` : "—", higher: false };
-  }).sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return a.higher ? b.primary - a.primary : a.primary - b.primary; });
+    const toPar = t.thru ? t.net - parThru(rs) : null;
+    if (round.kind === "stableford") {
+      const s = playerStbl(holes, rs, p.h);
+      return { p, sortVal: s.pts, thru: s.thru, gross: t.gross, net: t.net, toPar, stbl: s.pts, higher: true };
+    }
+    return { p, sortVal: t.net, thru: t.thru, gross: t.gross, net: t.net, toPar, stbl: null, higher: false };
+  }).sort((a, b) => { if (!a.thru) return 1; if (!b.thru) return -1; return a.higher ? b.sortVal - a.sortVal : a.sortVal - b.sortVal; });
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -358,31 +393,51 @@ function Scoring({ state, me, setName, save }) {
           {state.players.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
         </select></div>}
 
-      {myPlayer && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} />}
+      {myPlayer && <MyCard player={myPlayer} holes={holes} roundKey={roundKey} round={round} setScore={setScore} submitRound={submitRound} isSubmitted={isSubmitted(myPlayer)} />}
 
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Round {round.n} — {round.name}</div>
         <div style={{ display: "grid", gap: 1, marginTop: 10 }}>
-          <div style={{ ...S.lbRow, ...S.lbHead }}><span style={{ width: 24 }}>#</span><span style={{ flex: 1 }}>Player</span><span style={{ width: 50, textAlign: "center" }}>Thru</span><span style={{ width: 64, textAlign: "right" }}>{round.kind === "stableford" ? "Points" : "Net"}</span></div>
-          {rows.map(({ p, primary, thru, label, higher }, i) => (
+          <div style={{ ...S.lbRow, ...S.lbHead }}>
+            <span style={{ width: 24 }}>#</span>
+            <span style={{ flex: 1 }}>Player</span>
+            <span style={{ width: 42, textAlign: "center" }}>Thru</span>
+            {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right" }}>Pts</span>}
+            <span style={{ width: 52, textAlign: "right" }}>Gross</span>
+            <span style={{ width: 52, textAlign: "right" }}>Net</span>
+          </div>
+          {rows.map(({ p, thru, gross, net, toPar, stbl }, i) => (
             <div key={p.id}>
               <div className="nz-lbrow" style={{ ...S.lbRow, cursor: "pointer" }} onClick={() => setOpen(open === p.id ? null : p.id)}>
                 <span style={{ width: 24, color: C.copperLt, fontWeight: 700, fontFamily: SANS }}>{thru ? i + 1 : "–"}</span>
-                <span style={{ flex: 1, fontWeight: 600 }}>{p.name}{p.name === me && <span style={S.youDot}>you</span>}</span>
-                <span style={{ width: 50, textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{thru === 18 ? "F" : thru || "—"}</span>
-                <span style={{ width: 64, textAlign: "right", fontWeight: 800, fontFamily: SANS, color: C.copperLt }}>{thru ? label : "—"}</span>
+                <span style={{ flex: 1, fontWeight: 600 }}>{p.name}{p.name === me && <span style={S.youDot}>you</span>}{isSubmitted(p) && <span style={S.subDot}>✓</span>}</span>
+                <span style={{ width: 42, textAlign: "center", color: C.fescue, fontFamily: SANS, fontSize: 13 }}>{thru === 18 ? "F" : thru || "—"}</span>
+                {round.kind === "stableford" && <span style={{ width: 44, textAlign: "right", fontWeight: 700, fontFamily: SANS, color: C.cream }}>{thru ? stbl : "—"}</span>}
+                <span style={{ width: 52, textAlign: "right", fontFamily: SANS, color: C.cream }}>{thru ? gross : "—"}</span>
+                <span style={{ width: 52, textAlign: "right", fontWeight: 800, fontFamily: SANS, color: toPar == null ? C.fescue : toPar < 0 ? C.birdie : toPar > 0 ? C.copperLt : C.cream }}>{thru ? relToPar(toPar) : "—"}</span>
               </div>
-              {open === p.id && <div className="nz-expand"><Scorecard player={p} holes={holes} roundKey={roundKey} /></div>}
+              {open === p.id && <div className="nz-expand">
+                <Scorecard player={p} holes={holes} roundKey={roundKey} />
+                {isCommish && (
+                  <div style={{ display: "flex", gap: 6, padding: "4px 8px 10px" }}>
+                    {isSubmitted(p)
+                      ? <button style={S.miniGhost} onClick={() => reopenRound(p.id, roundKey)}>Reopen round</button>
+                      : <span style={{ fontSize: 12, color: C.fescue, fontFamily: SANS }}>Not submitted</span>}
+                    <button style={{ ...S.miniGhost, color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }}
+                      onClick={() => { if (window.confirm(`Clear ${p.name}'s Round ${round.n} scores? This erases their card for this round.`)) clearRound(p.id, roundKey); }}>Clear scores</button>
+                  </div>
+                )}
+              </div>}
             </div>
           ))}
         </div>
-        <p style={S.hint}>Tap a player to see their full scorecard. Net scoring applied automatically.</p>
+        <p style={S.hint}>Tap a player to see their full scorecard. Net scoring applied automatically.{isCommish ? " As commissioner you can reopen or clear a submitted round here." : ""}</p>
       </div>
     </div>
   );
 }
 
-function MyCard({ player, holes, roundKey, round, setScore }) {
+function MyCard({ player, holes, roundKey, round, setScore, submitRound, isSubmitted }) {
   const rs = player.scores[roundKey] || {};
   const thru = holes.filter((H) => rs[H.hole] != null).length;
   const nextHole = thru >= 18 ? 18 : (() => { const miss = holes.find((H) => rs[H.hole] == null); return miss ? miss.hole : 18; })();
@@ -393,12 +448,21 @@ function MyCard({ player, holes, roundKey, round, setScore }) {
   const strokes = strokesOnHole(H.si, player.h);
   const t = round.kind === "stableford" ? playerStbl(holes, rs, player.h).pts : playerNetTotal(holes, rs, player.h).net;
 
+  // Soft lock: when submitted, editing a hole asks for confirmation first.
+  const guardedSetScore = (pid, hole, val) => {
+    if (isSubmitted) {
+      if (!window.confirm("This round is already submitted. Edit anyway?")) return;
+    }
+    setScore(pid, hole, val);
+  };
+
   return (
-    <div className="nz-mycard" style={S.myCard}>
+    <div className="nz-mycard" style={{ ...S.myCard, ...(isSubmitted ? { borderColor: C.birdie } : {}) }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <div style={S.kicker}>Your Card · {player.name} · R{round.n}</div>
         <div style={{ fontFamily: SANS, fontSize: 13, color: C.cream, opacity: 0.85 }}>{thru === 0 ? "Not started" : `Thru ${thru} · ${round.kind === "stableford" ? t + " pts" : t + " net"}`}</div>
       </div>
+      {isSubmitted && <div style={S.submittedTag}>✓ SUBMITTED — locked. Tap a score to edit (you'll be asked to confirm). Commissioner can reopen.</div>}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
         <button className="nz-holenav" style={S.holeNav} disabled={h <= 1} onClick={() => setH(Math.max(1, h - 1))}>‹</button>
         <div style={{ textAlign: "center", flex: 1 }}>
@@ -411,11 +475,17 @@ function MyCard({ player, holes, roundKey, round, setScore }) {
       <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 16, flexWrap: "wrap" }}>
         {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
           const diff = n - H.par; const active = cur === n;
-          return <button key={n} className="nz-score" onClick={() => { setScore(player.id, h, n); if (h < 18) setTimeout(() => setH(h + 1), 200); }} style={{ ...S.scoreBtn, ...(active ? scoreColor(diff) : {}) }}>{n}</button>;
+          return <button key={n} className="nz-score" onClick={() => { guardedSetScore(player.id, h, n); if (h < 18) setTimeout(() => setH(h + 1), 200); }} style={{ ...S.scoreBtn, ...(active ? scoreColor(diff) : {}) }}>{n}</button>;
         })}
       </div>
       {cur != null && <div style={{ textAlign: "center", marginTop: 12, fontFamily: SANS, fontSize: 13, color: C.cream, opacity: 0.9 }}>
-        Gross {cur} · Net {netHole(cur, H.si, player.h)} on {h}. <button style={S.clearBtn} onClick={() => setScore(player.id, h, null)}>clear</button></div>}
+        Gross {cur} · Net {netHole(cur, H.si, player.h)} on {h}. <button style={S.clearBtn} onClick={() => guardedSetScore(player.id, h, null)}>clear</button></div>}
+      {!isSubmitted && (
+        <button className="nz-primary" style={{ ...S.primaryBtn, opacity: thru === 18 ? 1 : 0.55 }}
+          onClick={() => { if (thru < 18 && !window.confirm(`You've only entered ${thru} of 18 holes. Submit anyway?`)) return; submitRound(player.id, roundKey); }}>
+          {thru === 18 ? "Submit Round" : `Submit Round (${thru}/18)`}
+        </button>
+      )}
     </div>
   );
 }
@@ -471,14 +541,16 @@ function RoundDetail({ r, state, tp, ranked }) {
   if (r.kind.includes("ryder")) {
     const ms = r.key === "r1" ? state.ryder.r1 : state.ryder.r2;
     if (!state.ryder.teamA.length) return <p style={S.hint}>Teams not set yet — commissioner assigns Team A / Team B.</p>;
-    return <div style={{ marginTop: 8 }}>{(ms || []).map((m) => (
+    return <div style={{ marginTop: 8 }}>
+      <p style={S.hint}>Counts toward the combined Ryder Cup (6 points total across both rounds). The team that wins the majority takes the Cup, and each player on that team gets 2 TP — not per match.</p>
+      {(ms || []).map((m) => (
       <div key={m.id} style={S.matchRow}>
         <span style={{ flex: 1 }}>{m.xs.map((id) => P(id)?.name).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => P(id)?.name).join(" & ")}</span>
         <span style={{ fontFamily: SANS, color: m.result ? C.copperLt : C.fescue }}>{m.result === "X" ? "◀" : m.result === "Y" ? "▶" : m.result === "H" ? "AS" : "—"}</span>
       </div>))}</div>;
   }
   if (r.key === "r4") {
-    if (!state.r4.matches.length) return <p style={S.hint}>Pairings set after R3 standings — 1st+8th vs 2nd+7th, 3rd+6th vs 4th+5th.</p>;
+    if (!state.r4.matches.length) return <p style={S.hint}>Pairings set after R3 standings — 1st+8th vs 4th+5th, 2nd+7th vs 3rd+6th.</p>;
     return <div style={{ marginTop: 8 }}>{state.r4.matches.map((m) => { const res = bestBallResult(state.holes, m, state);
       return <div key={m.id} style={S.matchRow}><span style={{ flex: 1 }}>{m.xs.map((id) => P(id)?.name).join(" & ")} <span style={{ color: C.fescue }}>vs</span> {m.ys.map((id) => P(id)?.name).join(" & ")}</span>
         <span style={{ fontFamily: SANS, color: C.copperLt }}>{res.complete ? (res.up > 0 ? `${res.up}↑ X` : res.up < 0 ? `${-res.up}↑ Y` : "AS") : (res.up === 0 ? "—" : `${res.up > 0 ? "+" : ""}${res.up}`)}</span></div>; })}</div>;
@@ -726,8 +798,8 @@ function CommishR4({ state, save, flash, ranked }) {
   const autobuild = async () => {
     if (ranked.length < 8) return flash("Need standings first.");
     const matches = [
-      { id: uid(), xs: [ranked[0], ranked[7]], ys: [ranked[1], ranked[6]] },
-      { id: uid(), xs: [ranked[2], ranked[5]], ys: [ranked[3], ranked[4]] },
+      { id: uid(), xs: [ranked[0], ranked[7]], ys: [ranked[3], ranked[4]] }, // 1st+8th vs 4th+5th
+      { id: uid(), xs: [ranked[1], ranked[6]], ys: [ranked[2], ranked[5]] }, // 2nd+7th vs 3rd+6th
     ];
     await save({ ...state, r4: { matches } });
     flash("Pairings built from standings.");
@@ -735,7 +807,7 @@ function CommishR4({ state, save, flash, ranked }) {
   return (
     <div className="nz-glass" style={S.card}>
       <div style={S.cardTitle}>Round 4 — Best Ball Pairings</div>
-      <p style={S.hint}>Auto-build from current standings: 1st+8th vs 2nd+7th, and 3rd+6th vs 4th+5th. Each winner earns 4 TP.</p>
+      <p style={S.hint}>Auto-build from current standings: 1st+8th vs 4th+5th, and 2nd+7th vs 3rd+6th. Each player on a winning pair earns 4 TP.</p>
       <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10 }} onClick={autobuild}>Auto-build from standings</button>
       <div style={{ marginTop: 12 }}>
         {state.r4.matches.map((m, i) => (
@@ -987,6 +1059,17 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     flash("Market settled live — money board updated.");
   };
   const rmMarket = async (marketId) => save({ ...state, markets: state.markets.filter((m) => m.id !== marketId), bets: state.bets.filter((b) => b.marketId !== marketId) });
+  const clearAllBets = async () => {
+    // Wipes every bet (pending + settled) against the freshest live data. Markets stay.
+    const latest = migrate((await loadState()) || state);
+    await liveSettle({ ...latest, bets: [] });
+    flash("All bets cleared.");
+  };
+  const clearPendingBets = async () => {
+    const latest = migrate((await loadState()) || state);
+    await liveSettle({ ...latest, bets: latest.bets.filter((b) => b.status !== "pending") });
+    flash("Outstanding (unsettled) bets cleared.");
+  };
 
   return (
     <>
@@ -996,6 +1079,17 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
           <button className="nz-small" style={S.smallBtn} onClick={openOutright}>+ Tournament Winner</button>
           <button className="nz-small" style={S.smallBtn} onClick={openNextRound}>+ Wins Next Round</button>
+        </div>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>Clear Bets</div>
+        <p style={S.hint}>{state.bets.length === 0 ? "No bets on the board." : `${state.bets.filter((b) => b.status === "pending").length} outstanding · ${state.bets.length} total on the board.`} Clearing acts on live data immediately.</p>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button style={{ ...S.miniGhost, padding: "11px 16px" }}
+            onClick={() => { if (state.bets.some((b) => b.status === "pending") && window.confirm("Clear all OUTSTANDING (unsettled) bets? Settled bets and the money board stay.")) clearPendingBets(); }}>Clear outstanding bets</button>
+          <button style={{ ...S.miniGhost, padding: "11px 16px", color: C.bogeyBad, borderColor: "rgba(224,117,85,0.5)" }}
+            onClick={() => { if (state.bets.length && window.confirm("Clear ALL bets, including settled ones? This wipes the entire bet history and money board. Cannot be undone.")) clearAllBets(); }}>Clear ALL bets</button>
         </div>
       </div>
 
@@ -1156,6 +1250,10 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  switcherRow: { display: 'flex', gap: 8, alignItems: 'center', padding: '10px 18px 2px', justifyContent: 'flex-end' },
+  switcher: { background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.18)', borderRadius: 10, color: '#F7F1E6', padding: '6px 10px', fontSize: 13, fontFamily: SANS, outline: 'none' },
+  submittedTag: { marginTop: 10, padding: '8px 12px', background: 'rgba(154,209,122,0.16)', border: '1px solid rgba(154,209,122,0.5)', borderRadius: 10, color: '#9AD17A', fontFamily: SANS, fontSize: 12, lineHeight: 1.5 },
+  subDot: { fontSize: 11, color: '#0b1a0b', background: '#9AD17A', padding: '1px 6px', borderRadius: 10, marginLeft: 7, fontFamily: SANS, verticalAlign: 'middle' },
   heroPhoto: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' },
   heroPhotoScrim: { position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(14,11,20,0.15) 0%, rgba(14,11,20,0.1) 40%, rgba(14,11,20,0.72) 100%)' },
   heroLogo: { height: 38, width: 'auto', filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.7))', objectFit: 'contain' },
