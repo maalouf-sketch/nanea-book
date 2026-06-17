@@ -1061,27 +1061,46 @@ function PinGate({ pinEntry, setPinEntry, onTry }) {
 
 // ---- animated hero ----
 function Hero({ name, sub, badge, minimal }) {
+  // Tries your real photo (public/clubhouse.jpg) and logo (public/logo.png).
+  // If a file isn't there, it falls back to the animated sunset so nothing breaks.
+  const [photoOk, setPhotoOk] = useState(true);
+  const [logoOk, setLogoOk] = useState(true);
+
   return (
     <div style={S.hero}>
-      <svg style={S.heroSvg} viewBox="0 0 400 240" preserveAspectRatio="xMidYMid slice">
-        <defs>
-          <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#241133" /><stop offset="38%" stopColor="#7A2E5A" /><stop offset="64%" stopColor="#D9633F" /><stop offset="84%" stopColor="#F2A65A" /><stop offset="100%" stopColor="#F6C97D" /></linearGradient>
-          <radialGradient id="sun" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#FFF1D0" /><stop offset="45%" stopColor="#FFD98A" /><stop offset="100%" stopColor="#F2A65A" stopOpacity="0" /></radialGradient>
-          <linearGradient id="ocean" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#E8915A" /><stop offset="40%" stopColor="#9C5A6E" /><stop offset="100%" stopColor="#1B2A4A" /></linearGradient>
-          <linearGradient id="mtn" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#2A1838" /><stop offset="100%" stopColor="#14202E" /></linearGradient>
-        </defs>
-        <rect x="0" y="0" width="400" height="158" fill="url(#sky)" />
-        <g className="nz-clouds" opacity="0.35"><ellipse cx="80" cy="48" rx="70" ry="9" fill="#FFD98A" opacity="0.4" /><ellipse cx="300" cy="70" rx="90" ry="10" fill="#F2A65A" opacity="0.35" /><ellipse cx="200" cy="34" rx="60" ry="7" fill="#FFE9C0" opacity="0.3" /></g>
-        <circle className="nz-sunglow" cx="200" cy="150" r="120" fill="url(#sun)" />
-        <circle className="nz-sun" cx="200" cy="150" r="30" fill="#FFF1D0" />
-        <path d="M0 158 L70 96 L120 130 L175 78 L230 130 L300 92 L400 150 L400 158 Z" fill="url(#mtn)" opacity="0.95" />
-        <rect x="0" y="156" width="400" height="84" fill="url(#ocean)" />
-        <g className="nz-shimmer"><rect x="188" y="160" width="24" height="3" rx="1.5" fill="#FFE9C0" opacity="0.8" /><rect x="184" y="170" width="32" height="3" rx="1.5" fill="#FFD98A" opacity="0.6" /><rect x="180" y="182" width="40" height="3" rx="1.5" fill="#F2A65A" opacity="0.5" /><rect x="176" y="196" width="48" height="3" rx="1.5" fill="#E8915A" opacity="0.4" /></g>
-      </svg>
-      <div style={S.heroVignette} />
+      {photoOk ? (
+        <>
+          <img src="/clubhouse.jpg" alt="Nanea Golf Club" style={S.heroPhoto} onError={() => setPhotoOk(false)} />
+          <div style={S.heroPhotoScrim} />
+        </>
+      ) : (
+        <>
+          <svg style={S.heroSvg} viewBox="0 0 400 240" preserveAspectRatio="xMidYMid slice">
+            <defs>
+              <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#241133" /><stop offset="38%" stopColor="#7A2E5A" /><stop offset="64%" stopColor="#D9633F" /><stop offset="84%" stopColor="#F2A65A" /><stop offset="100%" stopColor="#F6C97D" /></linearGradient>
+              <radialGradient id="sun" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#FFF1D0" /><stop offset="45%" stopColor="#FFD98A" /><stop offset="100%" stopColor="#F2A65A" stopOpacity="0" /></radialGradient>
+              <linearGradient id="ocean" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#E8915A" /><stop offset="40%" stopColor="#9C5A6E" /><stop offset="100%" stopColor="#1B2A4A" /></linearGradient>
+              <linearGradient id="mtn" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#2A1838" /><stop offset="100%" stopColor="#14202E" /></linearGradient>
+            </defs>
+            <rect x="0" y="0" width="400" height="158" fill="url(#sky)" />
+            <g className="nz-clouds" opacity="0.35"><ellipse cx="80" cy="48" rx="70" ry="9" fill="#FFD98A" opacity="0.4" /><ellipse cx="300" cy="70" rx="90" ry="10" fill="#F2A65A" opacity="0.35" /><ellipse cx="200" cy="34" rx="60" ry="7" fill="#FFE9C0" opacity="0.3" /></g>
+            <circle className="nz-sunglow" cx="200" cy="150" r="120" fill="url(#sun)" />
+            <circle className="nz-sun" cx="200" cy="150" r="30" fill="#FFF1D0" />
+            <path d="M0 158 L70 96 L120 130 L175 78 L230 130 L300 92 L400 150 L400 158 Z" fill="url(#mtn)" opacity="0.95" />
+            <rect x="0" y="156" width="400" height="84" fill="url(#ocean)" />
+            <g className="nz-shimmer"><rect x="188" y="160" width="24" height="3" rx="1.5" fill="#FFE9C0" opacity="0.8" /><rect x="184" y="170" width="32" height="3" rx="1.5" fill="#FFD98A" opacity="0.6" /><rect x="180" y="182" width="40" height="3" rx="1.5" fill="#F2A65A" opacity="0.5" /><rect x="176" y="196" width="48" height="3" rx="1.5" fill="#E8915A" opacity="0.4" /></g>
+          </svg>
+          <div style={S.heroVignette} />
+        </>
+      )}
       {!minimal && (
         <div style={S.heroContent}>
-          <div style={S.heroTopRow}><Domes />{badge && (badge === "COMMISSIONER" ? <span style={S.commishBadge}>{badge}</span> : <span style={S.youBadge}>{badge}</span>)}</div>
+          <div style={S.heroTopRow}>
+            {logoOk
+              ? <img src="/logo.png" alt="Nanea Golf Club" style={S.heroLogo} onError={() => setLogoOk(false)} />
+              : <Domes />}
+            {badge && (badge === "COMMISSIONER" ? <span style={S.commishBadge}>{badge}</span> : <span style={S.youBadge}>{badge}</span>)}
+          </div>
           <div style={S.kicker}>Nanea Golf Club</div>
           <h1 style={S.h1}>{name}</h1>
           <div style={S.sub}>{sub}</div>
@@ -1137,6 +1156,9 @@ const C = {
   birdie: "#9AD17A", bogeyBad: "#E07555", ocean: "#5B8FB8", line: "rgba(255,255,255,0.1)",
 };
 const S = {
+  heroPhoto: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' },
+  heroPhotoScrim: { position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(14,11,20,0.15) 0%, rgba(14,11,20,0.1) 40%, rgba(14,11,20,0.72) 100%)' },
+  heroLogo: { height: 38, width: 'auto', filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.7))', objectFit: 'contain' },
   saveBar: { position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 60, display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', maxWidth: 680, margin: '0 auto', background: 'linear-gradient(135deg, #F2C188, #C77F45)', borderTopLeftRadius: 16, borderTopRightRadius: 16, boxShadow: '0 -8px 30px rgba(0,0,0,0.4)' },
   saveBtn: { background: '#1a0f08', color: '#F2C188', border: 'none', borderRadius: 10, padding: '11px 18px', fontWeight: 700, cursor: 'pointer', fontFamily: SANS, fontSize: 14 },
   discardBtn: { background: 'rgba(0,0,0,0.15)', color: '#1a0f08', border: 'none', borderRadius: 10, padding: '11px 14px', fontWeight: 600, cursor: 'pointer', fontFamily: SANS, fontSize: 13 },
