@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { loadState, saveState, subscribe } from "./store.js";
+import { loadState, saveState, subscribe, uploadAvatar } from "./store.js";
 // ============================================================
 // NANEA — THE BOOK  ·  Tournament edition (Stage 1: scoring engine)
 // 6-round net tournament for 8 players + Ryder Cup + Tournament Points.
@@ -1443,6 +1443,7 @@ function refreshedOptions(market, state, tp) {
 // Should this market be closed to NEW bets? Locks when the outcome is decided or so
 // lopsided it's effectively decided, or when the commish has manually locked it.
 function marketLocked(market, state) {
+  if (state.bookPaused) return { locked: true, reason: "Book paused" };
   if (market.locked) return { locked: true, reason: "Closed by commissioner" };
   if (market.status === "settled") return { locked: true, reason: "Settled" };
   if (market.kind === "match" && market.matchRef) {
@@ -1464,6 +1465,7 @@ function BookView({ state, tp, me, setName, save, flash }) {
   const P = (id) => state.players.find((x) => x.id === id);
 
   const place = async () => {
+    if (state.bookPaused) { setSel(null); return flash("The book is paused right now."); }
     if (!me) return flash("Check in with your name first.");
     if (!sel) return flash("Tap a line to bet.");
     const mkt = state.markets.find((x) => x.id === sel.marketId);
@@ -1486,6 +1488,13 @@ function BookView({ state, tp, me, setName, save, flash }) {
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
+      {state.bookPaused && (
+        <div className="nz-glass" style={{ ...S.card, border: "1px solid rgba(224,117,85,0.5)", textAlign: "center" }}>
+          <div style={{ fontSize: 30 }}>⏸️</div>
+          <div style={S.cardTitle}>The Book is temporarily closed</div>
+          <p style={{ ...S.hint, textAlign: "center" }}>The commissioner has paused betting. Existing bets still stand — you just can't place new ones right now. Check back soon.</p>
+        </div>
+      )}
       {!me && <div className="nz-glass" style={S.card}><div style={S.cardTitle}>Log in to bet</div>
         <p style={S.hint}>Use the Check In box at the top to log in with your name and code, then you can place bets.</p></div>}
 
@@ -1763,6 +1772,15 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
         </div>
       </div>
 
+      <div className="nz-glass" style={{ ...S.card, border: state.bookPaused ? "1px solid rgba(224,117,85,0.5)" : undefined }}>
+        <div style={S.cardTitle}>Pause the Book</div>
+        <p style={S.hint}>{state.bookPaused ? "The book is PAUSED — players can't place new bets and see a closed message. Existing bets stand." : "Temporarily close betting. Players will see a 'temporarily closed' message; existing bets stay put."}</p>
+        <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10, ...(state.bookPaused ? { background: "linear-gradient(135deg,#9AD17A,#6FA04E)" } : { background: "linear-gradient(135deg,#E07555,#C04A2A)", color: "#fff" }) }}
+          onClick={() => save({ ...state, bookPaused: !state.bookPaused })}>
+          {state.bookPaused ? "▶ Reopen the Book" : "⏸ Pause the Book"}
+        </button>
+      </div>
+
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Clear Bets</div>
         <p style={S.hint}>{state.bets.length === 0 ? "No bets on the board." : `${state.bets.filter((b) => b.status === "pending").length} outstanding · ${state.bets.length} total on the board.`} Clearing acts on live data immediately.</p>
@@ -1921,7 +1939,11 @@ function Avatar({ player, size = 40 }) {  if (!player) return null;
   const initials = dispName(player).split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase();
   const palette = ["#C77F45", "#5B8FB0", "#9AD17A", "#D98A5B", "#A88BC4", "#E0A95B", "#7BA8A0", "#C96A6A"];
   const color = palette[(player.name.charCodeAt(0) + player.name.length) % palette.length];
-  const isEmoji = player.avatar && !player.avatar.startsWith("#");
+  const isPhoto = player.avatar && /^https?:\/\//.test(player.avatar);
+  const isEmoji = player.avatar && !isPhoto && !player.avatar.startsWith("#");
+  if (isPhoto) {
+    return <img src={player.avatar} alt={initials} style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0, border: "2px solid rgba(255,255,255,0.2)" }} />;
+  }
   return (
     <div style={{ width: size, height: size, borderRadius: "50%", background: isEmoji ? "rgba(255,255,255,0.1)" : color,
       display: "grid", placeItems: "center", fontSize: isEmoji ? size * 0.55 : size * 0.4, fontWeight: 800, fontFamily: SANS,
@@ -1956,6 +1978,18 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
     const players = state.players.map((p) => p.id === playerId ? { ...p, avatar: av } : p);
     await save({ ...state, players });
   };
+  const [uploading, setUploading] = useState(false);
+  const onPickPhoto = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setUploading(true);
+    try {
+      const url = await uploadAvatar(playerId, file);
+      await setAvatar(url);
+      flash("Photo updated.");
+    } catch (err) { flash(err.message || "Upload failed."); }
+    setUploading(false);
+    e.target.value = "";
+  };
 
   return (
     <div style={S.modalOverlay} onClick={onClose}>
@@ -1973,18 +2007,22 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
         {canEdit && (
           <div style={{ marginTop: 14 }}>
             <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, marginBottom: 6 }}>AVATAR</div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
               <button onClick={() => setAvatar("")} style={{ ...S.avatarPick, ...(!player.avatar ? S.avatarPickOn : {}) }} title="initials">Aa</button>
               {AVATAR_EMOJIS.map((e) => (
                 <button key={e} onClick={() => setAvatar(e)} style={{ ...S.avatarPick, ...(player.avatar === e ? S.avatarPickOn : {}) }}>{e}</button>
               ))}
+              <label style={{ ...S.avatarPick, width: "auto", padding: "0 12px", cursor: "pointer", opacity: uploading ? 0.5 : 1 }}>
+                {uploading ? "…" : "📷 Photo"}
+                <input type="file" accept="image/*" style={{ display: "none" }} disabled={uploading} onChange={onPickPhoto} />
+              </label>
             </div>
             <div style={{ fontSize: 11, letterSpacing: 1.5, color: C.fescue, fontFamily: SANS, margin: "12px 0 4px" }}>NICKNAME</div>
             <div style={{ display: "flex", gap: 8 }}>
               <input className="nz-input" style={S.input} value={editName} onChange={(e) => setEditName(e.target.value)} placeholder={player.name} />
               <button className="nz-small" style={S.smallBtn} onClick={saveName}>Save</button>
             </div>
-            <p style={{ ...S.hint }}>Shows everywhere instead of your full name (your real name stays in small text underneath). Leave blank to just use your name. You always log in with your full name. Photo upload coming later.</p>
+            <p style={{ ...S.hint }}>Nickname shows everywhere instead of your full name (real name stays in small text underneath). Blank = just your name. You always log in with your full name.</p>
           </div>
         )}
 
