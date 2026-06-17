@@ -9,7 +9,9 @@
     <title>The Nanea Book</title>
     <style>
       html, body, #root { height: 100%; margin: 0; background: #0E0B14; }
-      body { -webkit-font-smoothing: antialiased; }
+      html, body { max-width: 100%; overflow-x: hidden; overscroll-behavior-x: none; }
+      *, *::before, *::after { box-sizing: border-box; }
+      body { -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     </style>
   </head>
   <body>
