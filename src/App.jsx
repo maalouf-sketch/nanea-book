@@ -1855,40 +1855,85 @@ function stakesByOption(state, marketId, optionIds) {
   return optionIds.map((id) => map[id]);
 }
 
+// Max TP a single player can still earn from rounds not yet complete. As this shrinks,
+// a given TP gap to the leader becomes harder to close — so the odds should tighten around
+// the leaders late and stay loose early. This is the mathematical backbone of the winner odds.
+function pointsRemaining(state) {
+  const R = RZ(state);
+  const P = (id) => state.players.find((x) => x.id === id);
+  const maxFinish = Math.max(...R.finishTP);
+  let rem = 0;
+  // Ryder (R1+R2): if not all matches are final, the ryder points are still live
+  const ry = state.ryder;
+  const ryderDone = ry.teamA?.length && ry.teamB?.length &&
+    [...(ry.r1 || []), ...(ry.r2 || [])].length > 0 &&
+    [...(ry.r1 || []), ...(ry.r2 || [])].every((m) => ryderMatchResult(state.holes, m, state, (ry.r1 || []).includes(m) ? "r1" : "r2").final);
+  if (!ryderDone) rem += R.ryderTP;
+  // R3 Stableford
+  const r3done = state.players.length && state.players.every((p) => playerStbl(state.holes, p.scores.r3, effH(p, state), R).thru === 18);
+  if (!r3done) rem += maxFinish;
+  // R4 Best Ball
+  const r4done = (state.r4.matches || []).length > 0 && (state.r4.matches || []).every((m) => bestBallResult(state.holes, m, state).final);
+  if (!r4done) rem += R.bestBallTP;
+  // R5 Stroke
+  const r5done = state.players.length && state.players.every((p) => playerNetTotal(state.holes, p.scores.r5, effH(p, state)).thru === 18);
+  if (!r5done) rem += maxFinish;
+  return Math.max(1, rem); // never zero (avoid divide-by-zero; 1 keeps late odds sharp)
+}
+
 function autoOddsByTP(state, tp, marketId, openOdds) {
   const ps = state.players.map((p) => ({ id: p.id, name: dispName(p), tp: tp.tp[p.id] }));
   const liveRound = currentLiveRound(state);
-  const LIVE_W = 1.5; // how much in-progress play moves the line (visible per-hole movement)
-  // live movement each player has earned: TP banked + nudge from round in progress
-  const movement = ps.map((p) => p.tp + (liveRound ? LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0));
-  let probs;
-  if (openOdds && Object.keys(openOdds).length) {
-    // anchor: start from the commish's opening implied probabilities, then add live movement
-    const base = ps.map((p) => {
-      const o = openOdds[p.id];
-      const impliedProb = o != null ? (o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100)) : 0.12;
-      return Math.log(Math.max(impliedProb, 0.01)); // log-space so we can add movement linearly
-    });
-    const strengths = base.map((b, i) => b * 6 + movement[i]); // anchor weight + live movement
-    probs = softmax(strengths, 6);
-  } else {
-    const strengths = ps.map((p, i) => p.tp + 8 + (liveRound ? LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0));
-    probs = softmax(strengths, 6);
-  }
+  const rem = pointsRemaining(state);
+  const leadTp = Math.max(0, ...ps.map((p) => p.tp));
+  // Catchability backbone: a player's deficit to the leader matters RELATIVE to points still
+  // available. Early (rem large) a 2-TP gap is trivial; late (rem small) it's nearly fatal.
+  // So the same gap separates the field more and more as the tournament runs out of points.
+  const SCALE = 7;
+  const tpStrength = (p) => -((leadTp - p.tp) / rem) * SCALE;
+  // A hot live round adds on top and can override the standings.
+  const LIVE_W = 1.4;
+  const live = (p) => liveRound ? LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0;
+  // Opening line: a light STARTING nudge that fades as real points are earned (never a cage).
+  const remStart = pointsRemaining({ players: state.players, holes: state.holes, ryder: { teamA: [1], teamB: [1], r1: [], r2: [] }, r4: { matches: [] }, rules: state.rules });
+  const openNudge = (p) => {
+    if (!openOdds || openOdds[p.id] == null) return 0;
+    const o = openOdds[p.id];
+    const impl = o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100);
+    return (impl - 0.125) * 4 * Math.min(1, rem / remStart); // fades from full → 0 as points run out
+  };
+  const strengths = ps.map((p) => tpStrength(p) + live(p) + openNudge(p));
+  let probs = softmax(strengths, 1.0);
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, ps.map((p) => p.id)));
   return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i], FLOOR_MULTI)) }));
 }
 
-// The Armadillo — who finishes LAST. Lowest TP / worst live position is the favorite to lose.
+// The Armadillo — who finishes LAST. Built as the INVERSE of the winner market: the player
+// furthest behind on TP (relative to points remaining) is the favorite to lose, and a hot
+// live round pulls a player OUT of loser contention. Mirrors autoOddsByTP, flipped.
 function autoOddsArmadillo(state, tp, marketId) {
   const ps = state.players.map((p) => ({ id: p.id, name: dispName(p), tp: tp.tp[p.id] }));
   const liveRound = currentLiveRound(state);
-  const LIVE_W = 1.5;
-  const maxTp = Math.max(1, ...ps.map((p) => p.tp));
-  // invert: fewer points (and worse live play) = MORE likely to be the loser.
-  // A player struggling in the live round drifts toward favorite-to-lose.
-  const strengths = ps.map((p) => (maxTp - p.tp) - (liveRound ? LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0));
-  let probs = softmax(strengths, 6);
+  const rem = pointsRemaining(state);
+  const lowTp = Math.min(...ps.map((p) => p.tp));
+  const SCALE = 7;
+  // furthest BELOW the field's floor → strongest to lose. Relative to points remaining,
+  // so as the tournament ends a trailing player gets locked in as the favorite to lose.
+  const loseStrength = (p) => -((p.tp - lowTp) / rem) * SCALE; // higher tp → less likely to lose
+  const LIVE_W = 1.4;
+  const live = (p) => liveRound ? -LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0; // playing well → less likely to lose
+  // Opening nudge: inverse of the winner market's opening line, fading as points are earned.
+  const winMkt = state.markets.find((m) => m.kind === "outright" && m.openOdds && m.status !== "settled");
+  const winOpen = winMkt ? winMkt.openOdds : null;
+  const remStart = pointsRemaining({ players: state.players, holes: state.holes, ryder: { teamA: [1], teamB: [1], r1: [], r2: [] }, r4: { matches: [] }, rules: state.rules });
+  const openNudge = (p) => {
+    if (!winOpen || winOpen[p.id] == null) return 0;
+    const o = winOpen[p.id];
+    const impl = o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100);
+    return -(impl - 0.125) * 4 * Math.min(1, rem / remStart); // inverse of winner nudge
+  };
+  const strengths = ps.map((p) => loseStrength(p) + live(p) + openNudge(p));
+  let probs = softmax(strengths, 1.0);
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, ps.map((p) => p.id)));
   return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i], FLOOR_MULTI)) }));
 }
