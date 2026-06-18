@@ -1398,7 +1398,7 @@ function Commish({ state, save, flash, tp }) {
         <p style={S.hint}>Edits are held as a draft on your screen until you press <b>Save</b>. Player scores keep updating live the whole time and are never overwritten by your save.</p>
       </div>
 
-      {section === "setup" && <CommishSetup state={draft} save={draftSave} flash={flash} />}
+      {section === "setup" && <CommishSetup state={draft} save={draftSave} liveSave={liveSettle} flash={flash} />}
       {section === "rules" && <CommishRules state={draft} save={draftSave} flash={flash} />}
       {section === "ryder" && <CommishRyder state={draft} save={draftSave} flash={flash} />}
       {section === "r4" && <CommishR4 state={draft} save={draftSave} flash={flash} ranked={ranked} />}
@@ -1500,12 +1500,24 @@ function CommishRules({ state, save, flash }) {
   );
 }
 
-function CommishSetup({ state, save, flash }) {
+function CommishSetup({ state, save, liveSave, flash }) {
   const [tName, setTName] = useState(state.tournamentName);
   const setSI = async (hole, si) => { const holes = state.holes.map((H) => H.hole === hole ? { ...H, si: Math.max(1, Math.min(18, parseInt(si) || H.si)) } : H); await save({ ...state, holes }); };
   const setPar = async (hole, par) => { const holes = state.holes.map((H) => H.hole === hole ? { ...H, par: Math.max(3, Math.min(6, parseInt(par) || H.par)) } : H); await save({ ...state, holes }); };
-  const setHcp = async (id, h) => { const players = state.players.map((p) => p.id === id ? { ...p, h: parseFloat(h) || 0 } : p); await save({ ...state, players }); };
-  const resetPin = async (id, name) => { if (!window.confirm(`Reset ${name}'s login code? They'll set a new one next time they log in.`)) return; const players = state.players.map((p) => p.id === id ? { ...p, pin: "" } : p); await save({ ...state, players }); flash(`${name}'s code reset.`); };
+  // Handicap + PIN changes touch the players array, which the draft-commit does NOT carry,
+  // so they must write live: pull the freshest state and apply the edit on top of it.
+  const setHcp = async (id, h) => {
+    const latest = migrate((await loadState()) || state);
+    const players = latest.players.map((p) => p.id === id ? { ...p, h: parseFloat(h) || 0 } : p);
+    await liveSave({ ...latest, players });
+  };
+  const resetPin = async (id, name) => {
+    if (!window.confirm(`Reset ${name}'s login code? They'll set a new one next time they log in.`)) return;
+    const latest = migrate((await loadState()) || state);
+    const players = latest.players.map((p) => p.id === id ? { ...p, pin: "" } : p);
+    await liveSave({ ...latest, players });
+    flash(`${name}'s code reset.`);
+  };
   return (
     <>
       <div className="nz-glass" style={S.card}>
