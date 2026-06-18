@@ -1951,8 +1951,15 @@ function autoOddsArmadillo(state, tp, marketId) {
 }
 
 // the round most likely "in progress" — the lowest-numbered round with partial scores
-function currentLiveRound(state) {
-  for (const r of ["r3", "r5", "r6", "r1", "r2"]) {
+// True once ANY score has been entered in ANY round (incl. scramble team cards) — i.e. play
+// has begun. Before this, opening lines should display exactly as the commish set them.
+function tournamentStarted(state) {
+  const anyPlayerScore = state.players.some((p) => ["r1", "r2", "r3", "r4", "r5", "r6"].some((rk) => Object.keys(p.scores[rk] || {}).length > 0));
+  const anyScramble = [...(state.ryder?.r1 || []), ...(state.ryder?.r2 || [])].some((m) => (m.xScores && Object.keys(m.xScores).length) || (m.yScores && Object.keys(m.yScores).length));
+  return anyPlayerScore || anyScramble;
+}
+
+function currentLiveRound(state) {  for (const r of ["r3", "r5", "r6", "r1", "r2"]) {
     const any = state.players.some((p) => Object.keys(p.scores[r] || {}).length > 0);
     if (any && !state.players.every((p) => Object.keys(p.scores[r] || {}).length === 18)) return r;
   }
@@ -2021,6 +2028,14 @@ function autoOddsOverUnder(state, tp, marketId) {
 
 // Regenerate odds for a market if it's auto (not manually pinned).
 function refreshedOptions(market, state, tp) {
+  // Before any score is entered, outright + armadillo markets show the commish's EXACT
+  // opening lines (no vig, no model) — so what you set is what everyone sees until play begins.
+  if ((market.kind === "outright" || market.kind === "armadillo") && market.openOdds && !tournamentStarted(state)) {
+    return market.options.map((o) => {
+      const set = market.openOdds[o.optionId];
+      return o.manual ? o : (set != null ? { ...o, odds: set } : o);
+    });
+  }
   if (market.kind === "outright" || market.kind === "next_round") {
     const auto = autoOddsByTP(state, tp, market.id, market.openOdds);
     return market.options.map((o) => o.manual ? o : (auto.find((x) => x.id === o.optionId) ? { ...o, odds: auto.find((x) => x.id === o.optionId).odds } : o));
@@ -2389,6 +2404,8 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
   const [propOpts, setPropOpts] = useState([{ label: "", odds: "" }, { label: "", odds: "" }]);
   // commish opening tournament-winner lines (American odds per player)
   const [openLines, setOpenLines] = useState(() => { const o = {}; state.players.forEach((p) => (o[p.id] = "")); return o; });
+  // commish opening Armadillo (tournament loser) lines
+  const [dilloLines, setDilloLines] = useState(() => { const o = {}; state.players.forEach((p) => (o[p.id] = "")); return o; });
 
   // Markets pay real money, so they commit LIVE immediately (not held in the commish draft,
   // which could be discarded or lost on a refresh). Pull freshest state, append, write once.
@@ -2399,22 +2416,24 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
 
   const openOutright = async () => {
     if (state.markets.some((m) => m.kind === "outright" && m.status !== "settled")) { flash("A Tournament Winner market is already open."); return; }
-    // use commish-entered opening lines as the anchor; blanks default to a mid line
+    // exact opening lines as set by the commish (blanks default to +800). Stored verbatim
+    // and shown as-is until the first score is entered, then the engine takes over.
     const openOdds = {};
     state.players.forEach((p) => { const v = parseInt(openLines[p.id]); openOdds[p.id] = Number.isFinite(v) ? v : 800; });
-    const auto = autoOddsByTP(state, tp, null, openOdds);
     const m = { id: uid(), title: "Tournament Winner", kind: "outright", live: true, status: "open", openOdds,
-      options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
+      options: state.players.map((p) => ({ optionId: p.id, label: dispName(p), odds: openOdds[p.id], manual: false })) };
     await liveAddMarket(m);
-    flash("Tournament winner market opened — opening lines set, will drift with scores.");
+    flash("Tournament winner market opened at your exact lines — will drift once scores start.");
   };
   const openArmadillo = async () => {
     if (state.markets.some((m) => m.kind === "armadillo" && m.status !== "settled")) { flash("The Armadillo market is already open."); return; }
-    const auto = autoOddsArmadillo(state, tp);
-    const m = { id: uid(), title: "The Armadillo (Tournament Loser)", kind: "armadillo", live: true, status: "open",
-      options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
+    // exact opening lines as set by the commish (blanks default to +800).
+    const openOdds = {};
+    state.players.forEach((p) => { const v = parseInt(dilloLines[p.id]); openOdds[p.id] = Number.isFinite(v) ? v : 800; });
+    const m = { id: uid(), title: "The Armadillo (Tournament Loser)", kind: "armadillo", live: true, status: "open", openOdds,
+      options: state.players.map((p) => ({ optionId: p.id, label: dispName(p), odds: openOdds[p.id], manual: false })) };
     await liveAddMarket(m);
-    flash("The Armadillo market opened — odds invert the winner market, settles on the tournament loser.");
+    flash("The Armadillo opened at your exact lines — will drift once scores start.");
   };
   const openNextRound = async () => {
     const auto = autoOddsByTP(state, tp);
@@ -2567,7 +2586,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
 
       <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Tournament Winner — Set Opening Lines</div>
-        <p style={S.hint}>Set each player's opening odds (American, e.g. +650 or -120). These anchor the market and drift automatically as scores and points come in. Blank = +800 default.</p>
+        <p style={S.hint}>Set each player's opening odds (American, e.g. +650 or -120). These show <b>exactly as entered</b> until the first score is posted, then drift automatically with scores and points. Blank = +800 default.</p>
         <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
           {state.players.map((p) => (
             <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2580,11 +2599,24 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
       </div>
 
       <div className="nz-glass" style={S.card}>
+        <div style={S.cardTitle}>🦫 The Armadillo — Set Opening Lines</div>
+        <p style={S.hint}>Odds for who finishes <b>last</b>. Set each player's opening line (worst players = shorter odds to lose). Shows exactly as entered until the first score, then drifts as the inverse of the winner race. Blank = +800 default.</p>
+        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+          {state.players.map((p) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flex: 1, fontFamily: SANS, fontSize: 14 }}>{p.name} <span style={{ color: C.fescue }}>· hcp {p.h}</span></span>
+              <input className="nz-input" style={{ ...S.input, width: 100 }} type="number" placeholder="+800" value={dilloLines[p.id]} onChange={(e) => setDilloLines({ ...dilloLines, [p.id]: e.target.value })} />
+            </div>
+          ))}
+        </div>
+        <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10 }} onClick={openArmadillo}>+ Open The Armadillo Market</button>
+      </div>
+
+      <div className="nz-glass" style={S.card}>
         <div style={S.cardTitle}>Quick Markets</div>
         <p style={S.hint}>One tap — auto-priced off handicaps and live position, and they auto-close once decided.</p>
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
           <button className="nz-small" style={S.smallBtn} onClick={openNextRound}>+ Wins Next Round</button>
-          <button className="nz-small" style={S.smallBtn} onClick={openArmadillo}>+ 🦫 The Armadillo</button>
           <button className="nz-small" style={S.smallBtn} onClick={openAllMatches}>+ All Ryder Matches</button>
           <button className="nz-small" style={S.smallBtn} onClick={openOverUnder}>+ Ryder Pts O/U 3.5</button>
           <button className="nz-small" style={S.smallBtn} onClick={openCupWinner}>+ Ryder Cup Winner</button>
