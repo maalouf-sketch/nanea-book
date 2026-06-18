@@ -1950,6 +1950,35 @@ function autoOddsArmadillo(state, tp, marketId) {
   return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i], FLOOR_MULTI)) }));
 }
 
+// Live Ryder Cup winner odds. Two options (Team A / Team B). Driven by points already banked
+// plus how the in-progress matches are currently leaning, scaled by matches still to play —
+// so the favorite tightens as the cup gets closer to clinched. Returns [teamA_odds, teamB_odds].
+function autoOddsCupWinner(state, openOdds) {
+  const ry = state.ryder;
+  const P = (id) => state.players.find((x) => x.id === id);
+  const all = [...(ry.r1 || []).map((m) => ({ m, rk: "r1" })), ...(ry.r2 || []).map((m) => ({ m, rk: "r2" }))];
+  const total = all.length || 6;
+  let aPts = 0, bPts = 0, aLean = 0, bLean = 0, played = 0;
+  all.forEach(({ m, rk }) => {
+    const res = ryderMatchResult(state.holes, m, state, rk);
+    if (res.final) { played++; if (res.result === "X") aPts++; else if (res.result === "Y") bPts++; else { aPts += 0.5; bPts += 0.5; } }
+    else if (res.thru > 0) { // in progress: lean by current up/down, scaled by how far along
+      const w = Math.min(1, res.thru / 18) * 0.5;
+      if (res.up > 0) aLean += w; else if (res.up < 0) bLean += w;
+    }
+  });
+  const remaining = Math.max(0, total - played);
+  // strength = banked points + current lean; the gap matters more as fewer matches remain.
+  const sharpness = 1 + (played / total) * 2; // 1 early → 3 when nearly done
+  let sA = (aPts + aLean) * sharpness, sB = (bPts + bLean) * sharpness;
+  // before any play, fall back to the commish opening line (or even) so it shows as set
+  if (played === 0 && aLean === 0 && bLean === 0 && openOdds) {
+    return [openOdds[0], openOdds[1]];
+  }
+  let probs = softmax([sA, sB], 1.2);
+  return [withVig(probToAmerican(probs[0], FLOOR_TWOWAY)), withVig(probToAmerican(probs[1], FLOOR_TWOWAY))];
+}
+
 // the round most likely "in progress" — the lowest-numbered round with partial scores
 // True once ANY score has been entered in ANY round (incl. scramble team cards) — i.e. play
 // has begun. Before this, opening lines should display exactly as the commish set them.
@@ -2052,9 +2081,14 @@ function refreshedOptions(market, state, tp) {
     const auto = autoOddsArmadillo(state, tp, market.id);
     return market.options.map((o) => o.manual ? o : (auto.find((x) => x.id === o.optionId) ? { ...o, odds: auto.find((x) => x.id === o.optionId).odds } : o));
   }
+  if (market.kind === "prop" && /cup winner/i.test(market.title || "")) {
+    // re-price live off Ryder standings unless options are manually pinned
+    const opening = market.openOdds ? [market.openOdds.A, market.openOdds.B] : null;
+    const [aOdds, bOdds] = autoOddsCupWinner(state, opening);
+    return market.options.map((o, i) => o.manual ? o : { ...o, odds: i === 0 ? aOdds : bOdds });
+  }
   return market.options;
 }
-// lopsided it's effectively decided, or when the commish has manually locked it.
 // Determine a market's outcome from live data.
 // Returns { decided, winningOptionId, lock, reason } — lock can be true before
 // fully decided (runaway lead). winningOptionId is only meaningful when decided.
@@ -2154,10 +2188,46 @@ function marketOutcome(market, state, tp) {
   return none; // fun props (longest drive, etc.) stay manual
 }
 
+// Has any score been entered for a given round? (player scores or, for r1, scramble team cards)
+function roundHasScores(state, roundKey) {
+  const anyPlayer = state.players.some((p) => Object.keys(p.scores[roundKey] || {}).length > 0);
+  if (anyPlayer) return true;
+  if (roundKey === "r1" || roundKey === "r2") {
+    return (state.ryder?.[roundKey] || []).some((m) => (m.xScores && Object.keys(m.xScores).length) || (m.yScores && Object.keys(m.yScores).length));
+  }
+  return false;
+}
+// Has a specific Ryder match begun? (a score on either side of THAT match)
+function matchHasScores(state, matchRef) {
+  if (!matchRef) return false;
+  const m = [...(state.ryder?.r1 || []), ...(state.ryder?.r2 || [])].find((x) => x.id === matchRef.id);
+  if (!m) return false;
+  const rk = matchRef.roundKey;
+  // scramble (r1) uses team cards; singles (r2) uses each player's own round scores
+  if (rk === "r1") return (m.xScores && Object.keys(m.xScores).length) || (m.yScores && Object.keys(m.yScores).length);
+  const ids = [...(m.xs || []), ...(m.ys || [])];
+  return ids.some((id) => { const p = state.players.find((x) => x.id === id); return p && Object.keys(p.scores[rk] || {}).length > 0; });
+}
+
 function marketLocked(market, state, tp) {
   if (state.bookPaused) return { locked: true, reason: "Book paused" };
   if (market.locked) return { locked: true, reason: "Closed by commissioner" };
   if (market.status === "settled") return { locked: true, reason: "Settled" };
+
+  // --- Auto-close at the right kickoff for each market type ---
+  const r1Started = roundHasScores(state, "r1");
+  // Over/Under on Ryder points + 3-putt / custom props tied to the scramble: close once R1 begins.
+  if (r1Started) {
+    if (market.kind === "overunder") return { locked: true, reason: "Round 1 underway — Ryder O/U closed" };
+    // custom props that are about the Ryder scramble (commish-named) — close at R1 start.
+    // Cup Winner is intentionally EXEMPT: it keeps trading through R1 and R2.
+    if (market.kind === "prop" && !/cup winner/i.test(market.title || "")) return { locked: true, reason: "Round 1 underway — prop closed" };
+  }
+  // Ryder match markets: each closes when ITS OWN match tees off.
+  if (market.kind === "match" && market.matchRef && matchHasScores(state, market.matchRef)) {
+    return { locked: true, reason: market.matchRef.roundKey === "r1" ? "Scramble match underway" : "Singles match underway" };
+  }
+
   if (tp) { const o = marketOutcome(market, state, tp); if (o.lock) return { locked: true, reason: o.reason }; }
   return { locked: false };
 }
@@ -2413,6 +2483,57 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     const latest = migrate((await loadState()) || state);
     await liveSettle({ ...latest, markets: [...latest.markets, ...newMarkets] });
   };
+  // Overwrite an existing market in place (keeps its bets), committing live.
+  const liveUpdateMarket = async (marketId, patch) => {
+    const latest = migrate((await loadState()) || state);
+    await liveSettle({ ...latest, markets: latest.markets.map((m) => m.id === marketId ? { ...m, ...patch } : m) });
+  };
+
+  // Build openOdds + options from the per-player input lines (blanks → +800).
+  const linesToMarket = (lines) => {
+    const openOdds = {};
+    state.players.forEach((p) => { const v = parseInt(lines[p.id]); openOdds[p.id] = Number.isFinite(v) ? v : 800; });
+    const options = state.players.map((p) => ({ optionId: p.id, label: dispName(p), odds: openOdds[p.id], manual: false }));
+    return { openOdds, options };
+  };
+
+  // Replace the lines on the existing winner (or armadillo) market without removing it.
+  const replaceLines = async (kind, lines) => {
+    const existing = state.markets.find((m) => m.kind === kind && m.status !== "settled");
+    if (!existing) { flash("No open market to replace — open one first."); return; }
+    if (tournamentStarted(state) && !window.confirm("Scores are already in, so the market is live. Overwrite the lines anyway? Existing bets keep their locked odds.")) return;
+    const { openOdds, options } = linesToMarket(lines);
+    await liveUpdateMarket(existing.id, { openOdds, options });
+    flash("Opening lines replaced — existing bets keep their locked odds.");
+  };
+
+  // Auto-fill the Armadillo inputs as the INVERSE of the current winner market lines:
+  // the player with the LONGEST odds to win becomes the SHORTEST odds to lose.
+  const autofillDilloFromWinner = () => {
+    const win = state.markets.find((m) => m.kind === "outright" && m.status !== "settled");
+    // prefer the live winner market's stored lines; fall back to the current winner inputs
+    const winLines = {};
+    state.players.forEach((p) => {
+      let v = win?.openOdds?.[p.id];
+      if (v == null) { const iv = parseInt(openLines[p.id]); v = Number.isFinite(iv) ? iv : 800; }
+      winLines[p.id] = v;
+    });
+    // implied win prob → invert to lose prob → American. Higher win-odds (longshot to win)
+    // become the favorite to lose.
+    const winProb = {}; let sum = 0;
+    state.players.forEach((p) => { const o = winLines[p.id]; const impl = o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100); winProb[p.id] = impl; sum += impl; });
+    // lose-weight = (1 - normalized win share); normalize and convert to American w/o vig
+    const inv = {}; let invSum = 0;
+    state.players.forEach((p) => { const share = winProb[p.id] / (sum || 1); const w = Math.max(0.02, 1 - share); inv[p.id] = w; invSum += w; });
+    const out = {};
+    state.players.forEach((p) => {
+      const prob = inv[p.id] / invSum;
+      const am = probToAmerican(prob, FLOOR_MULTI);
+      out[p.id] = String(am);
+    });
+    setDilloLines(out);
+    flash("Armadillo lines auto-filled as the inverse of the winner odds — tweak as you like, then open.");
+  };
 
   const openOutright = async () => {
     if (state.markets.some((m) => m.kind === "outright" && m.status !== "settled")) { flash("A Tournament Winner market is already open."); return; }
@@ -2475,12 +2596,16 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     const P2 = (id) => state.players.find((x) => x.id === id);
     const sumH = (ids) => ids.reduce((s, id) => s + (P2(id)?.h || 0), 0);
     const probs = softmax([-sumH(state.ryder.teamA), -sumH(state.ryder.teamB)], 12);
-    const m = { id: uid(), title: "Ryder Cup Winner", kind: "prop", live: false, status: "open", options: [
-      { optionId: uid(), label: state.ryder.teamAName || "Team A", odds: withVig(probToAmerican(probs[0], FLOOR_TWOWAY)), manual: true },
-      { optionId: uid(), label: state.ryder.teamBName || "Team B", odds: withVig(probToAmerican(probs[1], FLOOR_TWOWAY)), manual: true },
+    const aOdds = withVig(probToAmerican(probs[0], FLOOR_TWOWAY));
+    const bOdds = withVig(probToAmerican(probs[1], FLOOR_TWOWAY));
+    // live: false stays as a flag, but options are NOT manual so they drift with Ryder standings.
+    // openOdds.A/B are the starting lines, shown until matches begin, then the engine takes over.
+    const m = { id: uid(), title: "Ryder Cup Winner", kind: "prop", live: true, status: "open", openOdds: { A: aOdds, B: bOdds }, options: [
+      { optionId: uid(), label: state.ryder.teamAName || "Team A", odds: aOdds, manual: false },
+      { optionId: uid(), label: state.ryder.teamBName || "Team B", odds: bOdds, manual: false },
     ] };
     await liveAddMarket(m);
-    flash("Cup winner market opened.");
+    flash("Cup winner market opened — odds will drift as the matches play out.");
   };
   const addProp = async () => {
     if (!propTitle.trim()) return flash("Title needed.");
@@ -2595,7 +2720,11 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
             </div>
           ))}
         </div>
-        <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10 }} onClick={openOutright}>+ Open Tournament Winner Market</button>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button className="nz-small" style={S.smallBtn} onClick={openOutright}>+ Open Tournament Winner Market</button>
+          {state.markets.some((m) => m.kind === "outright" && m.status !== "settled") &&
+            <button className="nz-small" style={{ ...S.smallBtn, background: "rgba(255,255,255,0.08)", color: C.copperLt }} onClick={() => replaceLines("outright", openLines)}>↻ Replace lines</button>}
+        </div>
       </div>
 
       <div className="nz-glass" style={S.card}>
@@ -2609,7 +2738,12 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
             </div>
           ))}
         </div>
-        <button className="nz-small" style={{ ...S.smallBtn, marginTop: 10 }} onClick={openArmadillo}>+ Open The Armadillo Market</button>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button className="nz-small" style={{ ...S.smallBtn, background: "rgba(255,255,255,0.08)", color: C.copperLt }} onClick={autofillDilloFromWinner}>⤵ Auto-fill from winner odds</button>
+          <button className="nz-small" style={S.smallBtn} onClick={openArmadillo}>+ Open The Armadillo Market</button>
+          {state.markets.some((m) => m.kind === "armadillo" && m.status !== "settled") &&
+            <button className="nz-small" style={{ ...S.smallBtn, background: "rgba(255,255,255,0.08)", color: C.copperLt }} onClick={() => replaceLines("armadillo", dilloLines)}>↻ Replace lines</button>}
+        </div>
       </div>
 
       <div className="nz-glass" style={S.card}>
