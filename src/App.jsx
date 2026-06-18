@@ -219,12 +219,12 @@ export default function App() {
 
   const tp = useMemo(() => computeTP(state), [state]);
 
-  // Auto-settle any market whose outcome is now mathematically decided. Runs on the
-  // commissioners' devices (idempotent + last-write-wins, so it's safe). The moment a
-  // Ryder match/cup, over-under, or the tournament winner is decided, pending bets pay out.
+  // Auto-settle any market whose outcome is now mathematically decided. Any active device
+  // can drive this — it's idempotent (re-settling a settled market is a no-op) and
+  // last-write-wins, so whoever has the app open when a match completes triggers the payout.
   useEffect(() => {
     if (loading) return;
-    if (!COMMISH_NAMES.includes(me)) return; // only commish devices drive settlement
+    if (!me) return; // must be logged in (so we have a live, subscribed client)
     const toSettle = (state.markets || []).filter((m) => m.status !== "settled").map((m) => ({ m, o: marketOutcome(m, state, tp) })).filter((x) => x.o.decided && x.o.winningOptionId);
     // also handle halved Ryder matches: decided (no winner) → all bets lose, market closes
     const halvedMatches = (state.markets || []).filter((m) => m.status !== "settled" && m.kind === "match").map((m) => ({ m, o: marketOutcome(m, state, tp) })).filter((x) => x.o.halved);
@@ -1811,6 +1811,25 @@ function playerLiveEdge(state, pid, roundKey) {
   return par ? par - net : 0; // positive = under par (playing well)
 }
 
+// Player "form" this trip: average strokes their NET differs from par across COMPLETED
+// stroke-based rounds (R3 Stableford excluded — it's points). Negative = playing better
+// than their handicap (net under par), positive = worse/rusty (net over par).
+// Returns { form, rounds } — form in strokes/round; 0 if no completed rounds yet.
+function playerForm(state, pid) {
+  const p = state.players.find((x) => x.id === pid); if (!p) return { form: 0, rounds: 0 };
+  const par = coursePar(state.holes);
+  let total = 0, n = 0;
+  ["r5", "r6", "r1", "r2"].forEach((rk) => {  // net-stroke style rounds; skip r3 (points)
+    const rs = p.scores[rk] || {};
+    const thru = state.holes.filter((H) => rs[H.hole] != null).length;
+    if (thru === 18 && par) {                 // only fully completed rounds count
+      const t = playerNetTotal(state.holes, rs, effH(p, state));
+      total += (t.net - par); n++;            // net vs par: + = over (worse), − = under (better)
+    }
+  });
+  return { form: n ? total / n : 0, rounds: n };
+}
+
 // Money-balancing: shade an option's probability toward where the stakes are.
 // More money on a side -> its implied prob rises (odds shorten), the other lengthens.
 // strength = base softmax probs (array), stakes = array of $ on each option.
@@ -1839,8 +1858,9 @@ function stakesByOption(state, marketId, optionIds) {
 function autoOddsByTP(state, tp, marketId, openOdds) {
   const ps = state.players.map((p) => ({ id: p.id, name: dispName(p), tp: tp.tp[p.id] }));
   const liveRound = currentLiveRound(state);
-  // live movement each player has earned: TP banked + gentle nudge from round in progress
-  const movement = ps.map((p) => p.tp + (liveRound ? 0.6 * playerLiveEdge(state, p.id, liveRound) : 0));
+  const LIVE_W = 1.5; // how much in-progress play moves the line (visible per-hole movement)
+  // live movement each player has earned: TP banked + nudge from round in progress
+  const movement = ps.map((p) => p.tp + (liveRound ? LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0));
   let probs;
   if (openOdds && Object.keys(openOdds).length) {
     // anchor: start from the commish's opening implied probabilities, then add live movement
@@ -1849,11 +1869,11 @@ function autoOddsByTP(state, tp, marketId, openOdds) {
       const impliedProb = o != null ? (o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100)) : 0.12;
       return Math.log(Math.max(impliedProb, 0.01)); // log-space so we can add movement linearly
     });
-    const strengths = base.map((b, i) => b * 10 + movement[i]); // *10 to weight the anchor strongly
-    probs = softmax(strengths, 10);
+    const strengths = base.map((b, i) => b * 6 + movement[i]); // anchor weight + live movement
+    probs = softmax(strengths, 6);
   } else {
-    const strengths = ps.map((p, i) => p.tp + 8 + (liveRound ? 0.6 * playerLiveEdge(state, p.id, liveRound) : 0));
-    probs = softmax(strengths, 10);
+    const strengths = ps.map((p, i) => p.tp + 8 + (liveRound ? LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0));
+    probs = softmax(strengths, 6);
   }
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, ps.map((p) => p.id)));
   return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i], FLOOR_MULTI)) }));
@@ -1863,10 +1883,12 @@ function autoOddsByTP(state, tp, marketId, openOdds) {
 function autoOddsArmadillo(state, tp, marketId) {
   const ps = state.players.map((p) => ({ id: p.id, name: dispName(p), tp: tp.tp[p.id] }));
   const liveRound = currentLiveRound(state);
+  const LIVE_W = 1.5;
   const maxTp = Math.max(1, ...ps.map((p) => p.tp));
-  // invert: fewer points (and worse live play) = MORE likely to be the loser
-  const strengths = ps.map((p) => (maxTp - p.tp) - (liveRound ? 0.6 * playerLiveEdge(state, p.id, liveRound) : 0));
-  let probs = softmax(strengths, 10);
+  // invert: fewer points (and worse live play) = MORE likely to be the loser.
+  // A player struggling in the live round drifts toward favorite-to-lose.
+  const strengths = ps.map((p) => (maxTp - p.tp) - (liveRound ? LIVE_W * playerLiveEdge(state, p.id, liveRound) : 0));
+  let probs = softmax(strengths, 6);
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, ps.map((p) => p.id)));
   return ps.map((p, i) => ({ id: p.id, label: p.name, odds: withVig(probToAmerican(probs[i], FLOOR_MULTI)) }));
 }
@@ -1881,29 +1903,39 @@ function currentLiveRound(state) {
 }
 
 // Two-way odds for a single Ryder match. Handicap sets the baseline (kept tight because
-// handicaps even the field); live match position shifts it — gently at 1 up, hard as a
-// side pulls away (4-5 up). Money on a side shades the line toward it.
+// Two-way odds for a Ryder match. Because handicaps even the field, the PRE-match line
+// starts near a coinflip. Three pre-match factors nudge it: form (how a player has played
+// vs. their handicap this trip — the biggest factor), handicap (minor), and the coinflip
+// base. Once live, match position dominates and swings hard as a side pulls away.
 function autoOddsForMatch(state, m, roundKey, marketId) {
   const P = (id) => state.players.find((x) => x.id === id);
   const sideH = (ids) => ids.length === 2 ? scrambleTeamHcp(effH(P(ids[0]), state), effH(P(ids[1]), state), RZ(state).scrambleLow, RZ(state).scrambleHigh) : (ids[0] ? effH(P(ids[0]), state) : 18);
-  const xs = roundKey === "r1" ? sideH(m.xs) : P(m.xs[0]).h;
-  const ys = roundKey === "r1" ? sideH(m.ys) : P(m.ys[0]).h;
-  // baseline handicap strength (small spread; temp 5 keeps it modest)
-  const baseX = -xs, baseY = -ys;
-  // live position: holes up, but scaled by how many holes remain. A 2-up lead early is
-  // soft; the same lead with few holes left is decisive. This keeps swings gentle until
-  // someone is genuinely pulling away.
+  const xs = roundKey === "r1" ? sideH(m.xs) : effH(P(m.xs[0]), state);
+  const ys = roundKey === "r1" ? sideH(m.ys) : effH(P(m.ys[0]), state);
+  // form: average of the side's players (lower = playing better than handicap → stronger).
+  const sideForm = (ids) => { const fs = ids.map((id) => playerForm(state, id).form); return fs.length ? fs.reduce((a, b) => a + b, 0) / fs.length : 0; };
+  const formX = sideForm(m.xs), formY = sideForm(m.ys);
+
+  // ---- pre-match strength (small numbers → near coinflip) ----
+  // handicap: MINOR (0.06/stroke). form: PRIMARY (0.18/stroke, negative form = stronger).
+  // The coinflip base is implicit: with equal form & handicap, strengths are equal = 50/50.
+  const HCAP_W = 0.06, FORM_W = 0.18;
+  const preX = -xs * HCAP_W - formX * FORM_W;
+  const preY = -ys * HCAP_W - formY * FORM_W;
+
   const res = ryderMatchResult(state.holes, m, state, roundKey);
   const up = res.up; // + = X ahead
   const remaining = Math.max(1, 18 - res.thru);
-  // dominance: a live lead should move the line HARD — being up means you're the better
-  // player or they're having an off day. Scales up with lead size and as holes run out.
-  const leadFrac = Math.abs(up) / Math.max(remaining, Math.abs(up)); // 0..1, bigger when lead approaches holes left
-  const dominance = Math.sign(up) * Math.pow(leadFrac, 0.6) * Math.abs(up);
-  const liveX = baseX + dominance * 1.6, liveY = baseY - dominance * 1.6;
+  // live lead dominates once play starts and swings HARD as a side pulls away,
+  // capped so a big early lead still leaves room for a comeback price.
+  const leadFrac = Math.abs(up) / Math.max(remaining, Math.abs(up));
+  let dominance = Math.sign(up) * Math.pow(leadFrac, 0.55) * Math.abs(up);
+  dominance = Math.sign(dominance) * Math.min(Math.abs(dominance), 2.4);
+  const liveX = preX + dominance * 1.0, liveY = preY - dominance * 1.0;
+
   let probs = res.final
     ? (res.result === "X" ? [0.97, 0.03] : res.result === "Y" ? [0.03, 0.97] : [0.5, 0.5])
-    : softmax([liveX, liveY], 5);
+    : softmax([liveX, liveY], 2.5);  // temp 2.5: pre-match near coinflip, live leads move sharply
   const label = (ids) => ids.map((id) => dispName(P(id))).join(" & ");
   const optIds = ["X_" + m.id, "Y_" + m.id];
   if (marketId) probs = shadeForMoney(probs, stakesByOption(state, marketId, optIds));
@@ -2163,7 +2195,7 @@ function BookView({ state, tp, me, setName, save, flash, isCommish }) {
             <div style={S.cardTop}><span style={S.kindTag}>{m.kind === "outright" ? "OUTRIGHT" : m.kind === "armadillo" ? "🦫 THE ARMADILLO" : m.kind === "next_round" ? "NEXT ROUND" : m.kind === "match" ? "RYDER MATCH" : m.kind === "overunder" ? "OVER/UNDER" : "PROP"}</span>
               {lock.locked ? <span style={{ ...S.kindTag, color: C.bogeyBad }}>🔒 CLOSED</span> : m.live && <span style={{ ...S.kindTag, color: C.birdie }}>● LIVE ODDS</span>}</div>
             <div style={S.cardTitle}>{m.title}</div>
-            {m.kind === "match" && <div style={{ fontSize: 11.5, color: C.copperLt, fontFamily: SANS, marginTop: 3, fontStyle: "italic" }}>House rule: if this match is halved (tied), all bets on it lose — a tie is not a push.</div>}
+            {m.kind === "match" && <div style={{ fontSize: 11.5, color: C.copperLt, fontFamily: SANS, marginTop: 3, fontStyle: "italic" }}>⚠️ House rule: a halved (tied) match is NOT a push — all bets on it lose. Bet accordingly.</div>}
             {lock.locked && <div style={{ fontSize: 12, color: C.bogeyBad, fontFamily: SANS, marginTop: 2 }}>Betting closed — {lock.reason}</div>}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {opts.map((o) => {
@@ -2209,7 +2241,7 @@ function BookView({ state, tp, me, setName, save, flash, isCommish }) {
             </div>
           )}
           <div style={S.slipPick}>{sel.title}<br /><strong style={{ color: C.copperLt }}>{sel.label}</strong> @ {sel.odds > 0 ? `+${sel.odds}` : sel.odds}</div>
-          {sel.kind === "match" && <div style={{ fontSize: 11.5, color: C.copperLt, fontFamily: SANS, marginTop: 6, fontStyle: "italic" }}>Heads up: if the match is halved (tied), this bet loses — a tie is not a push.</div>}
+          {sel.kind === "match" && <div style={{ fontSize: 11.5, color: C.bogeyBad, fontFamily: SANS, marginTop: 6, fontStyle: "italic" }}>⚠️ If this match is halved (tied), this bet LOSES — a tie is not a push.</div>}
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
             <span style={{ color: C.cream, opacity: 0.8 }}>$</span>
             <input className="nz-input" style={S.input} type="number" placeholder="stake" value={stake} onChange={(e) => setStake(e.target.value)} />
