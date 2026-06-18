@@ -2390,14 +2390,22 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
   // commish opening tournament-winner lines (American odds per player)
   const [openLines, setOpenLines] = useState(() => { const o = {}; state.players.forEach((p) => (o[p.id] = "")); return o; });
 
+  // Markets pay real money, so they commit LIVE immediately (not held in the commish draft,
+  // which could be discarded or lost on a refresh). Pull freshest state, append, write once.
+  const liveAddMarket = async (...newMarkets) => {
+    const latest = migrate((await loadState()) || state);
+    await liveSettle({ ...latest, markets: [...latest.markets, ...newMarkets] });
+  };
+
   const openOutright = async () => {
+    if (state.markets.some((m) => m.kind === "outright" && m.status !== "settled")) { flash("A Tournament Winner market is already open."); return; }
     // use commish-entered opening lines as the anchor; blanks default to a mid line
     const openOdds = {};
     state.players.forEach((p) => { const v = parseInt(openLines[p.id]); openOdds[p.id] = Number.isFinite(v) ? v : 800; });
     const auto = autoOddsByTP(state, tp, null, openOdds);
     const m = { id: uid(), title: "Tournament Winner", kind: "outright", live: true, status: "open", openOdds,
       options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
-    await save({ ...state, markets: [...state.markets, m] });
+    await liveAddMarket(m);
     flash("Tournament winner market opened — opening lines set, will drift with scores.");
   };
   const openArmadillo = async () => {
@@ -2405,14 +2413,14 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     const auto = autoOddsArmadillo(state, tp);
     const m = { id: uid(), title: "The Armadillo (Tournament Loser)", kind: "armadillo", live: true, status: "open",
       options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
-    await save({ ...state, markets: [...state.markets, m] });
+    await liveAddMarket(m);
     flash("The Armadillo market opened — odds invert the winner market, settles on the tournament loser.");
   };
   const openNextRound = async () => {
     const auto = autoOddsByTP(state, tp);
     const m = { id: uid(), title: "Wins the Next Round", kind: "next_round", live: true, status: "open",
       options: auto.map((a) => ({ optionId: a.id, label: a.label, odds: a.odds, manual: false })) };
-    await save({ ...state, markets: [...state.markets, m] });
+    await liveAddMarket(m);
     flash("Next-round market opened.");
   };
   // Fun manual props the commish settles by hand.
@@ -2424,7 +2432,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     else if (kind === "threeputt") { title = "Most 3-putts"; options = playerOpts(700); }
     else if (kind === "round") { title = "First to buy a round at the clubhouse"; options = playerOpts(700); }
     const m = { id: uid(), title, kind: "prop", live: false, status: "open", options };
-    await save({ ...state, markets: [...state.markets, m] });
+    await liveAddMarket(m);
     flash(`"${title}" posted — settle it by hand.`);
   };
   // One-tap: a moneyline for every Ryder match (scramble + singles)
@@ -2434,13 +2442,13 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     const build = (m, rk, rn) => ({ id: uid(), title: `${rn}: ${label(m.xs)} vs ${label(m.ys)}`, kind: "match", matchRef: { id: m.id, roundKey: rk }, live: true, status: "open", options: autoOddsForMatch(state, m, rk) });
     const ms = [...(state.ryder.r1 || []).map((m) => build(m, "r1", "Scramble")), ...(state.ryder.r2 || []).map((m) => build(m, "r2", "Singles"))];
     if (!ms.length) return flash("Set Ryder matches first.");
-    await save({ ...state, markets: [...state.markets, ...ms] });
+    await liveAddMarket(...ms);
     flash(`${ms.length} match markets opened.`);
   };
   const openOverUnder = async () => {
     if (!state.ryder.teamA.length || !state.ryder.teamB.length) return flash("Set Ryder teams first.");
     const m = { id: uid(), title: `${state.ryder.teamAName || "Team A"} total Ryder points — O/U 3.5`, kind: "overunder", live: true, status: "open", options: autoOddsOverUnder(state, tp) };
-    await save({ ...state, markets: [...state.markets, m] });
+    await liveAddMarket(m);
     flash("Over/Under market opened.");
   };
   const openCupWinner = async () => {
@@ -2452,7 +2460,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
       { optionId: uid(), label: state.ryder.teamAName || "Team A", odds: withVig(probToAmerican(probs[0], FLOOR_TWOWAY)), manual: true },
       { optionId: uid(), label: state.ryder.teamBName || "Team B", odds: withVig(probToAmerican(probs[1], FLOOR_TWOWAY)), manual: true },
     ] };
-    await save({ ...state, markets: [...state.markets, m] });
+    await liveAddMarket(m);
     flash("Cup winner market opened.");
   };
   const addProp = async () => {
@@ -2460,7 +2468,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     const opts = propOpts.filter((o) => o.label.trim()).map((o) => ({ optionId: uid(), label: o.label.trim(), odds: parseInt(o.odds) || 100, manual: true }));
     if (opts.length < 2) return flash("Need 2+ options.");
     const m = { id: uid(), title: propTitle.trim(), kind: "prop", live: false, status: "open", options: opts };
-    await save({ ...state, markets: [...state.markets, m] });
+    await liveAddMarket(m);
     setPropTitle(""); setPropOpts([{ label: "", odds: "" }, { label: "", odds: "" }]);
     flash("Prop posted.");
   };
@@ -2483,7 +2491,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await liveSettle({ ...latest, markets, bets });
     flash("Market settled live — money board updated.");
   };
-  const rmMarket = async (marketId) => save({ ...state, markets: state.markets.filter((m) => m.id !== marketId), bets: state.bets.filter((b) => b.marketId !== marketId) });
+  const rmMarket = async (marketId) => { const latest = migrate((await loadState()) || state); await liveSettle({ ...latest, markets: latest.markets.filter((m) => m.id !== marketId), bets: latest.bets.filter((b) => b.marketId !== marketId) }); };
   const clearAllBets = async () => {
     // Wipes every bet (pending + settled) against the freshest live data. Markets stay.
     const latest = migrate((await loadState()) || state);
