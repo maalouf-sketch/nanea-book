@@ -340,13 +340,26 @@ function computeTP(state) {
     (ry.r1 || []).forEach((m) => tallyMatch(m, "r1"));
     (ry.r2 || []).forEach((m) => tallyMatch(m, "r2"));
     detail.ryder = { aPts, bPts, matchResults };
+    // The Cup is only DECIDED when someone has clinched (passed half of total points) or
+    // every match is final. Until then there is NO winner — so no early TP and no early
+    // settlement of the cup-winner bet. (Bug fix: previously a R1 points lead set a "winner".)
+    const allMatches = [...(ry.r1 || []), ...(ry.r2 || [])];
+    const totalPts = allMatches.length || 6;            // 1 point per match
+    const clinchLine = totalPts / 2;                    // need MORE than half to clinch
+    const allFinal = allMatches.length > 0 && allMatches.every((m) => matchResults[m.id]?.final);
+    const clinched = aPts > clinchLine ? "A" : bPts > clinchLine ? "B" : null;
     let winners = null;
-    if (aPts > bPts) winners = ry.teamA;
-    else if (bPts > aPts) winners = ry.teamB;
-    else if (ry.playoff === "A") winners = ry.teamA;
-    else if (ry.playoff === "B") winners = ry.teamB;
+    if (clinched === "A") winners = ry.teamA;
+    else if (clinched === "B") winners = ry.teamB;
+    else if (allFinal) {                                 // cup complete, decide on points / playoff
+      if (aPts > bPts) winners = ry.teamA;
+      else if (bPts > aPts) winners = ry.teamB;
+      else if (ry.playoff === "A") winners = ry.teamA;   // tie → captain playoff result
+      else if (ry.playoff === "B") winners = ry.teamB;
+    }
     if (winners) winners.forEach((id) => (tp[id] += R.ryderTP));
     detail.ryder.winners = winners;
+    detail.ryder.complete = !!winners || allFinal;       // for UI/settlement clarity
   }
 
   // ---- R3 Stableford ----
@@ -2176,8 +2189,14 @@ function marketOutcome(market, state, tp) {
   if (market.kind === "prop" && /cup winner/i.test(market.title || "")) {
     const d = tp.detail.ryder;
     if (!d || !d.winners) {
-      // clinch check: 3.5 of 6 wins
-      if (d) { if (d.aPts >= 3.5) return { ...none, lock: true, reason: "Team A clinched" }; if (d.bPts >= 3.5) return { ...none, lock: true, reason: "Team B clinched" }; }
+      // No decided winner yet. Lock betting only once a side has mathematically clinched
+      // (more than half of total points); otherwise the market stays open.
+      if (d) {
+        const totalPts = ([...(ry.r1 || []), ...(ry.r2 || [])].length) || 6;
+        const clinchLine = totalPts / 2;
+        if (d.aPts > clinchLine) return { ...none, lock: true, reason: "Team A clinched" };
+        if (d.bPts > clinchLine) return { ...none, lock: true, reason: "Team B clinched" };
+      }
       return none;
     }
     const winnerName = d.winners === ry.teamA ? (ry.teamAName || "Team A") : (ry.teamBName || "Team B");
