@@ -2508,6 +2508,36 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
     await liveSettle({ ...latest, markets: latest.markets.map((m) => m.id === marketId ? { ...m, ...patch } : m) });
   };
 
+  // Commish manual re-settle: force a market to a chosen winning option, re-grading EVERY bet
+  // on it (even ones already settled) so a wrong auto-settlement can be corrected after the fact.
+  const resettleMarket = async (marketId, winId) => {
+    const latest = migrate((await loadState()) || state);
+    const mkt = latest.markets.find((m) => m.id === marketId);
+    if (!mkt) return;
+    const winLabel = mkt.options.find((o) => o.optionId === winId)?.label || "—";
+    if (!window.confirm(`Re-settle "${mkt.title}" with ${winLabel} as the winner? Every bet on this market will be re-graded (including already-settled ones).`)) return;
+    const bets = latest.bets.map((b) => {
+      if (b.marketId !== marketId) return b;
+      const won = b.optionId === winId;
+      return { ...b, status: won ? "won" : "lost", payout: won ? +(b.stake * americanToMult(b.oddsAtBet)).toFixed(2) : 0 };
+    });
+    const markets = latest.markets.map((m) => m.id === marketId ? { ...m, status: "settled", winnerId: winId } : m);
+    await liveSettle({ ...latest, markets, bets });
+    flash(`Re-settled: ${winLabel} marked the winner. All bets re-graded.`);
+  };
+
+  // Void an entire market: refund every stake (no win/loss), mark it void.
+  const voidMarket = async (marketId) => {
+    const latest = migrate((await loadState()) || state);
+    const mkt = latest.markets.find((m) => m.id === marketId);
+    if (!mkt) return;
+    if (!window.confirm(`Void "${mkt.title}"? Every bet on it is refunded — stakes returned, no win or loss.`)) return;
+    const bets = latest.bets.map((b) => b.marketId === marketId ? { ...b, status: "void", payout: b.stake } : b);
+    const markets = latest.markets.map((m) => m.id === marketId ? { ...m, status: "settled", winnerId: null, voided: true } : m);
+    await liveSettle({ ...latest, markets, bets });
+    flash("Market voided — all stakes refunded.");
+  };
+
   // Build openOdds + options from the per-player input lines (blanks → +800).
   const linesToMarket = (lines) => {
     const openOdds = {};
@@ -2688,7 +2718,7 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
   const players = {};
   state.bets.forEach((b) => {
     if (!players[b.who]) players[b.who] = { net: 0, openStake: 0, openCould: 0 };
-    if (b.status === "won") players[b.who].net += (b.payout - b.stake);
+    if (b.status === "won") players[b.who].net += (b.payout - b.stake); else if (b.status === "void") {}
     else if (b.status === "lost") players[b.who].net -= b.stake;
     else { players[b.who].openStake += b.stake; players[b.who].openCould += (b.payout - b.stake); }
   });
@@ -2861,6 +2891,24 @@ function CommishBook({ state, save, flash, tp, liveSettle }) {
               ))}
             </div>
             {m.status !== "settled" && <p style={S.hint}>Type a number + Enter to pin a line. "won" settles the market and pays out.</p>}
+            {m.status !== "settled" && (
+              <button style={{ ...S.miniGhost, marginTop: 8, color: C.fescue }} onClick={() => voidMarket(m.id)}>void market · refund all stakes</button>
+            )}
+            {m.status === "settled" && !m.voided && (
+              <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+                <div style={{ fontSize: 11, letterSpacing: 1.2, color: C.copperLt, fontFamily: SANS, marginBottom: 6 }}>FIX SETTLEMENT</div>
+                <p style={{ ...S.hint, marginTop: 0 }}>Settled to: <b>{m.options.find((o) => o.optionId === m.winnerId)?.label || "—"}</b>. Re-grade every bet to the correct winner, or void to refund.</p>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                  {m.options.map((o) => (
+                    <button key={o.optionId} style={{ ...S.miniGhost, ...(o.optionId === m.winnerId ? { borderColor: C.birdie, color: C.birdie } : {}) }} onClick={() => resettleMarket(m.id, o.optionId)}>
+                      {o.optionId === m.winnerId ? "✓ " : ""}{o.label}
+                    </button>
+                  ))}
+                  <button style={{ ...S.miniGhost, color: C.fescue }} onClick={() => voidMarket(m.id)}>void · refund</button>
+                </div>
+              </div>
+            )}
+            {m.voided && <p style={{ ...S.hint, color: C.fescue, marginTop: 8 }}>Voided — all stakes refunded.</p>}
           </div>
         );
       })}
@@ -2998,7 +3046,7 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
   const myBets = state.bets.filter((b) => b.who === player.name);
   const openBets = myBets.filter((b) => b.status === "pending");
   const settledBets = myBets.filter((b) => b.status !== "pending");
-  const net = settledBets.reduce((s, b) => s + (b.status === "won" ? b.payout - b.stake : -b.stake), 0);
+  const net = settledBets.reduce((s, b) => s + (b.status === "won" ? b.payout - b.stake : b.status === "lost" ? -b.stake : 0), 0);
 
   const saveName = async () => {
     const nm = editName.trim();
@@ -3122,7 +3170,7 @@ function ProfileModal({ state, tp, playerId, isMe, isCommish, onClose, save, fla
               </div>
               {settledBets.length ? settledBets.map((b) => (
                 <div key={b.id} style={S.openBetRow}><span style={{ flex: 1 }}>{b.label}</span>
-                  <span style={{ fontFamily: SANS, color: b.status === "won" ? C.birdie : C.bogeyBad }}>{b.status === "won" ? `+$${(b.payout - b.stake).toFixed(2)}` : `-$${b.stake}`}</span></div>
+                  <span style={{ fontFamily: SANS, color: b.status === "won" ? C.birdie : b.status === "void" ? C.fescue : C.bogeyBad }}>{b.status === "won" ? `+$${(b.payout - b.stake).toFixed(2)}` : b.status === "void" ? "refunded" : `-$${b.stake}`}</span></div>
               )) : <p style={S.hint}>No settled bets yet.</p>}
             </>
           )}
