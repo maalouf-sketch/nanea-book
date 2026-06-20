@@ -80,6 +80,7 @@ const RULES_DEFAULTS = {
   ryderTP: 2,                               // TP to each player on the winning Ryder team
   scrambleLow: 35,                          // % of lower handicap in scramble blend
   scrambleHigh: 15,                         // % of higher handicap in scramble blend
+  bestBallRelative: false,                  // R4: stroke off the lowest handicap in each match
 };
 // Resolve rules from state with fallback to defaults (older saves may lack the field).
 const RZ = (state) => ({ ...RULES_DEFAULTS, ...(state?.rules || {}), stbl: { ...RULES_DEFAULTS.stbl, ...(state?.rules?.stbl || {}) } });
@@ -378,6 +379,10 @@ function computeTP(state) {
     const res = bestBallResult(holes, m, state);
     detail.r4.push(res);
     if (res.winner) res.winner.forEach((id) => (tp[id] += R.bestBallTP));
+    else if (res.complete) {
+      // all square → split the points: every player in the match gets half.
+      [...m.xs, ...m.ys].forEach((id) => (tp[id] += R.bestBallTP / 2));
+    }
   });
 
   // ---- R5 stroke ----
@@ -397,10 +402,16 @@ function computeTP(state) {
 function bestBallResult(holes, m, state) {
   const P = (id) => state.players.find((x) => x.id === id);
   const sc = (id) => (P(id)?.scores?.r4) || {};
+  // "Stroke off the lowest handicap": when on, subtract the group's lowest effective handicap
+  // from everyone, so the low player plays off scratch and the others only get the DIFFERENCE.
+  const rel = !!RZ(state).bestBallRelative;
+  const ids = [...m.xs, ...m.ys].filter(Boolean);
+  const lowH = rel && ids.length ? Math.min(...ids.map((id) => effH(P(id), state))) : 0;
+  const ph = (id) => Math.max(0, effH(P(id), state) - lowH);
   let x = 0, complete = true;
   holes.forEach((H) => {
-    const xs = m.xs.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, effH(P(id), state)) : null; }).filter((v) => v != null);
-    const ys = m.ys.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, effH(P(id), state)) : null; }).filter((v) => v != null);
+    const xs = m.xs.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, ph(id)) : null; }).filter((v) => v != null);
+    const ys = m.ys.map((id) => { const v = sc(id)[H.hole]; return v != null ? netHole(v, H.si, ph(id)) : null; }).filter((v) => v != null);
     if (!xs.length || !ys.length) { complete = false; return; }
     const xn = Math.min(...xs), yn = Math.min(...ys);
     if (xn < yn) x++; else if (yn < xn) x--;
@@ -1485,6 +1496,16 @@ function CommishRules({ state, save, flash }) {
           <div style={{ ...S.lbRow, alignItems: "center" }}>
             <span style={{ flex: 1 }}>Ryder Cup — per player on winning team <span style={{ color: C.fescue, fontSize: 12 }}>(default {RULES_DEFAULTS.ryderTP})</span></span>
             <NumF value={R.ryderTP} onChange={(val) => setRules({ ryderTP: parseFloat(val) || 0 })} />
+          </div>
+          <div style={{ ...S.lbRow, alignItems: "center" }}>
+            <div style={{ flex: 1 }}>
+              <div>Best ball — stroke off the lowest handicap</div>
+              <div style={{ fontSize: 12, color: C.fescue, fontFamily: SANS, marginTop: 2 }}>Low player in each match plays scratch; others get only the difference (e.g. 8 &amp; 13 → 0 &amp; 5).</div>
+            </div>
+            <button onClick={() => setRules({ bestBallRelative: !R.bestBallRelative })}
+              style={{ ...S.smallBtn, flexShrink: 0, minWidth: 64, background: R.bestBallRelative ? "linear-gradient(135deg,#9AD17A,#6FA04E)" : "rgba(255,255,255,0.08)", color: R.bestBallRelative ? "#0b1a0b" : C.fescue, border: R.bestBallRelative ? "none" : `1px solid ${C.glassBorder}` }}>
+              {R.bestBallRelative ? "ON" : "OFF"}
+            </button>
           </div>
         </div>
       </div>
